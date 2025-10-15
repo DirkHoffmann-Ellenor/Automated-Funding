@@ -7,7 +7,7 @@ from pathlib import Path
 
 # ========== CONFIG ==========
 # SECURITY: Use environment variable instead of hardcoding
-api_key = "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"
+api_key = os.getenv("APIKEY")
 if not api_key:
     raise ValueError("OPENAI_API_KEY environment variable not set")
 client = OpenAI(api_key=api_key)

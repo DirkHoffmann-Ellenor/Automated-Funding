@@ -6,11 +6,12 @@ from typing import Dict, List, Tuple, Set
 from pathlib import Path
 
 # ========== CONFIG ==========
-# SECURITY: Use environment variable instead of hardcoding
-api_key = os.getenv("APIKEY")
+api_key = os.getenv("APIKEY") or os.getenv("OPENAI_API_KEY")
 if not api_key:
-    raise ValueError("OPENAI_API_KEY environment variable not set")
-client = OpenAI(api_key=api_key)
+    print("[WARN] No API key found yet. It can be set later from Streamlit.")
+    api_key = None
+
+client = OpenAI(api_key=api_key) if api_key else None
 
 # Ellenor Hospice Profile for accurate matching
 ELLENOR_PROFILE = {
@@ -64,6 +65,7 @@ MAX_DISCOVERY_PAGES = 200
 PAUSE_BETWEEN_REQUESTS = 1.0
 HEADERS = {"User-Agent": "ellenor-funding-bot/priority/1.0 (+https://ellenor.org)"}
 OUTPUT_CSV = "funds_results_reprocessed.csv"
+INPUT_CSV = "funds.csv"
 
 LLM_PROMPT = """
 You are a precise information extractor for charity funding opportunities, specifically evaluating eligibility for ellenor Hospice.
@@ -410,6 +412,7 @@ def call_llm_extract(text: str) -> Dict:
 
 # ========== BATCH ORCHESTRATION ==========
 
+
 def get_already_processed_urls(output_csv: str) -> Set[str]:
     """Get set of URLs that have already been processed and saved to CSV."""
     if not os.path.exists(output_csv):
@@ -418,13 +421,13 @@ def get_already_processed_urls(output_csv: str) -> Set[str]:
     try:
         existing_df = pd.read_csv(output_csv)
         if "fund_url" in existing_df.columns:
-            # Normalize URLs for comparison
             processed_urls = {normalize_url(url) for url in existing_df["fund_url"].dropna()}
             return processed_urls
     except Exception as e:
         print(f"[WARN] Could not read existing CSV: {e}")
     
     return set()
+
 
 def get_scraped_domains(save_dir: str) -> Set[str]:
     """Get set of domains that have already been scraped (have folders)."""
@@ -439,24 +442,29 @@ def get_scraped_domains(save_dir: str) -> Set[str]:
     
     return scraped
 
-def process_csv_batch(input_csv: str, output_csv: str, batch_size: int = 5):
-    """Process funding URLs with improved CSV handling and per-folder CSV backup."""
+
+def process_new_funds(input_csv: str, output_csv: str, batch_size: int = 5):
+    """
+    MODE 1: Process new funding URLs from input CSV.
+    Scrapes websites and runs LLM extraction.
+    """
+    print("\n" + "="*60)
+    print("MODE 1: Processing New Funds from CSV")
+    print("="*60 + "\n")
+    
     df = pd.read_csv(input_csv)
     
-    # Ensure fund_name column exists (extract from URL if not present)
     if "fund_name" not in df.columns:
         df["fund_name"] = df["fund_url"].apply(lambda x: urlparse(x).netloc)
     
     os.makedirs(SAVE_DIR, exist_ok=True)
     
-    # Check both scraped folders AND output CSV for already-processed items
     scraped_domains = get_scraped_domains(SAVE_DIR)
     processed_urls = get_already_processed_urls(output_csv)
     
     print(f"🔎 Already scraped folders: {len(scraped_domains)}")
     print(f"📋 Already in results CSV: {len(processed_urls)}")
 
-    # Build batch of unprocessed URLs
     batch = []
     skipped_already_scraped = 0
     skipped_already_in_csv = 0
@@ -465,24 +473,20 @@ def process_csv_batch(input_csv: str, output_csv: str, batch_size: int = 5):
         url = row["fund_url"]
         normalized_url = normalize_url(url)
         
-        # Check if URL is already in output CSV
         if normalized_url in processed_urls:
             skipped_already_in_csv += 1
             continue
         
-        # Check if domain folder already exists
         domain_folder_name = safe_filename_from_url(url)
         if domain_folder_name.lower() in scraped_domains:
             skipped_already_scraped += 1
             continue
         
-        # This URL needs processing
         batch.append(row)
         
         if len(batch) >= batch_size:
             break
     
-    # Report what was skipped
     if skipped_already_in_csv > 0:
         print(f"⏭️  Skipped {skipped_already_in_csv} URLs (already in results CSV)")
     if skipped_already_scraped > 0:
@@ -499,7 +503,6 @@ def process_csv_batch(input_csv: str, output_csv: str, batch_size: int = 5):
         url = row["fund_url"]
         fund_name = row.get("fund_name", urlparse(url).netloc)
         
-        # Double-check before processing (in case of race conditions)
         domain_folder = os.path.join(SAVE_DIR, safe_filename_from_url(url))
         os.makedirs(domain_folder, exist_ok=True)
 
@@ -526,7 +529,6 @@ def process_csv_batch(input_csv: str, output_csv: str, batch_size: int = 5):
                 results.append(result)
                 continue
             
-            # Extract data with LLM
             data = call_llm_extract(text)
             result.update(data)
             
@@ -540,7 +542,6 @@ def process_csv_batch(input_csv: str, output_csv: str, batch_size: int = 5):
         
         results.append(result)
 
-        # --- NEW SECTION: Write an individual CSV inside each fund’s folder ---
         try:
             single_result_df = pd.DataFrame([result])
             for col in CSV_COLUMNS:
@@ -554,40 +555,8 @@ def process_csv_batch(input_csv: str, output_csv: str, batch_size: int = 5):
         except Exception as e:
             print(f"[WARNING] Could not write individual CSV for {fund_name}: {e}")
 
-    # Save results with proper column ordering
-    results_df = pd.DataFrame(results)
-    
-    # Ensure all expected columns exist
-    for col in CSV_COLUMNS:
-        if col not in results_df.columns:
-            results_df[col] = ""
-    
-    # Reorder columns
-    results_df = results_df[CSV_COLUMNS]
-    
-    # Append to main output file
-    try:
-        if os.path.exists(output_csv):
-            results_df.to_csv(output_csv, mode="a", index=False, header=False)
-        else:
-            results_df.to_csv(output_csv, index=False)
-        print(f"\n✅ Batch saved to {output_csv}")
-    except Exception as e:
-        print(f"[CRITICAL] Could not save to main results CSV ({output_csv}): {e}")
-        print("⚠️ All individual per-folder CSVs were still created successfully.")
-
-    print(f"📊 Summary:")
-    print(f"   - Highly Eligible: {sum(1 for r in results if r.get('eligibility') == 'Highly Eligible')}")
-    print(f"   - Eligible: {sum(1 for r in results if r.get('eligibility') == 'Eligible')}")
-    print(f"   - Possibly Eligible: {sum(1 for r in results if r.get('eligibility') == 'Possibly Eligible')}")
-    print(f"   - Low Match: {sum(1 for r in results if r.get('eligibility') == 'Low Match')}")
-    print(f"   - Not Eligible: {sum(1 for r in results if r.get('eligibility') == 'Not Eligible')}")
-    print(f"   - Errors: {sum(1 for r in results if r.get('error'))}")
-
-
-# if __name__ == "__main__":
-#     process_csv_batch("funds.csv", "funds_results.csv", batch_size=90)
-
+    save_results_to_csv(results, output_csv)
+    print_summary(results)
 
 
 def load_text_from_folder(folder_path: str) -> tuple[str, int, str]:
@@ -603,7 +572,6 @@ def load_text_from_folder(folder_path: str) -> tuple[str, int, str]:
     combined_text = []
     fund_url = ""
     
-    # Sort files for consistent processing
     txt_files.sort()
     
     for txt_file in txt_files:
@@ -612,9 +580,7 @@ def load_text_from_folder(folder_path: str) -> tuple[str, int, str]:
                 content = f.read()
                 combined_text.append(f"\n=== {txt_file.name} ===\n{content}")
                 
-                # Try to extract URL from first file if not found yet
                 if not fund_url and "_" in txt_file.name:
-                    # Extract domain from filename (e.g., "abcharitabletrust.org.uk_faqs.txt")
                     domain = txt_file.name.split('_')[0]
                     fund_url = f"https://{domain}"
         except Exception as e:
@@ -640,30 +606,62 @@ def get_already_processed_folders(output_csv: str) -> set:
         return set()
 
 
-def reprocess_scraped_funds(batch_size: int = 10):
+def reprocess_scraped_funds(input_csv: str, output_csv: str, batch_size: int = 10):
     """
-    Reprocess already-scraped funds by reading their txt files 
+    MODE 2: Reprocess already-scraped funds by reading their txt files 
     and running LLM extraction.
+    Only processes funds that are in input CSV but NOT in output CSV.
     """
+    print("\n" + "="*60)
+    print("MODE 2: Reprocessing Already-Scraped Funds")
+    print("="*60 + "\n")
+    
+    # Check if input CSV exists
+    if not os.path.exists(input_csv):
+        print(f"[ERROR] Input CSV not found: {input_csv}")
+        return
+    
     if not os.path.exists(SAVE_DIR):
         print(f"[ERROR] Scraped directory not found: {SAVE_DIR}")
         return
     
-    # Get all fund folders
-    fund_folders = [f for f in os.listdir(SAVE_DIR) 
-                   if os.path.isdir(os.path.join(SAVE_DIR, f))]
+    # Read input CSV to get the list of funds we care about
+    input_df = pd.read_csv(input_csv)
+    if "fund_url" not in input_df.columns:
+        print(f"[ERROR] Input CSV must have 'fund_url' column")
+        return
     
-    print(f"📁 Found {len(fund_folders)} scraped fund folders")
+    # Get already processed URLs from output CSV
+    processed_urls = get_already_processed_urls(output_csv)
+    print(f"✅ Already in output CSV: {len(processed_urls)}")
     
-    # Check which ones are already processed
-    already_processed = get_already_processed_folders(OUTPUT_CSV)
-    print(f"✅ Already processed: {len(already_processed)}")
+    # Build list of funds to process: in input CSV but NOT in output CSV
+    to_process = []
     
-    # Filter to unprocessed folders
-    to_process = [f for f in fund_folders if f not in already_processed]
+    for _, row in input_df.iterrows():
+        url = row["fund_url"]
+        normalized_url = normalize_url(url)
+        
+        # Skip if already in output CSV
+        if normalized_url in processed_urls:
+            continue
+        
+        # Check if scraped folder exists
+        domain_folder_name = safe_filename_from_url(url)
+        folder_path = os.path.join(SAVE_DIR, domain_folder_name)
+        
+        if os.path.exists(folder_path) and os.path.isdir(folder_path):
+            to_process.append({
+                'url': url,
+                'fund_name': row.get('fund_name', urlparse(url).netloc),
+                'folder_name': domain_folder_name,
+                'folder_path': folder_path
+            })
+    
+    print(f"📁 Found {len(to_process)} scraped funds in input CSV that need processing")
     
     if not to_process:
-        print("🎉 All funds already processed!")
+        print("🎉 All input CSV funds are either already processed or not yet scraped!")
         return
     
     # Limit to batch size
@@ -672,35 +670,35 @@ def reprocess_scraped_funds(batch_size: int = 10):
     
     results = []
     
-    for i, fund_name in enumerate(to_process, 1):
-        folder_path = os.path.join(SAVE_DIR, fund_name)
+    for i, fund_info in enumerate(to_process, 1):
+        folder_path = fund_info['folder_path']
+        fund_name = fund_info['fund_name']
+        url = fund_info['url']
         
         print(f"🔍 [{i}/{len(to_process)}] {fund_name}")
+        print(f"    {url}")
         
         result = {
+            "fund_url": url,
             "fund_name": fund_name,
             "extraction_timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
         }
         
         try:
-            # Load all text files from the folder
             combined_text, file_count, fund_url = load_text_from_folder(folder_path)
             
             if not combined_text or len(combined_text) < 100:
                 result["error"] = f"Insufficient text extracted (only {len(combined_text)} chars from {file_count} files)"
-                result["fund_url"] = fund_url
                 result["pages_scraped"] = file_count
                 results.append(result)
                 print(f"   ⚠️  Insufficient text ({len(combined_text)} chars)")
                 continue
             
-            result["fund_url"] = fund_url
             result["pages_scraped"] = file_count
             
             print(f"   📄 Loaded {file_count} text files ({len(combined_text):,} chars)")
-            
-            # Extract data with LLM
             print(f"   🤖 Running LLM extraction...")
+            
             data = call_llm_extract(combined_text)
             result.update(data)
             
@@ -715,7 +713,6 @@ def reprocess_scraped_funds(batch_size: int = 10):
         
         results.append(result)
         
-        # Save individual CSV in the fund folder
         try:
             single_result_df = pd.DataFrame([result])
             for col in CSV_COLUMNS:
@@ -729,29 +726,45 @@ def reprocess_scraped_funds(batch_size: int = 10):
         except Exception as e:
             print(f"   [WARNING] Could not write individual CSV: {e}")
     
-    # Save batch results to main CSV
-    if results:
-        results_df = pd.DataFrame(results)
-        
-        # Ensure all expected columns exist
-        for col in CSV_COLUMNS:
-            if col not in results_df.columns:
-                results_df[col] = ""
-        
-        # Reorder columns
-        results_df = results_df[CSV_COLUMNS]
-        
-        # Append to output file
-        try:
-            if os.path.exists(OUTPUT_CSV):
-                results_df.to_csv(OUTPUT_CSV, mode="a", index=False, header=False)
-            else:
-                results_df.to_csv(OUTPUT_CSV, index=False)
-            print(f"\n✅ Batch saved to {OUTPUT_CSV}")
-        except Exception as e:
-            print(f"\n[CRITICAL] Could not save to CSV: {e}")
+    save_results_to_csv(results, output_csv)
+    print_summary(results)
     
-    # Summary
+    # Calculate remaining based on input CSV
+    input_df = pd.read_csv(input_csv)
+    total_in_input = len(input_df)
+    remaining = total_in_input - len(processed_urls) - len(to_process)
+    
+    if remaining > 0:
+        print(f"\n⏳ {remaining} funds from input CSV remaining to process (run again to continue)")
+    else:
+        print(f"\n✅ All funds from input CSV have been processed!")
+
+
+def save_results_to_csv(results: list, output_csv: str):
+    """Save results to the output CSV file."""
+    if not results:
+        return
+    
+    results_df = pd.DataFrame(results)
+    
+    for col in CSV_COLUMNS:
+        if col not in results_df.columns:
+            results_df[col] = ""
+    
+    results_df = results_df[CSV_COLUMNS]
+    
+    try:
+        if os.path.exists(output_csv):
+            results_df.to_csv(output_csv, mode="a", index=False, header=False)
+        else:
+            results_df.to_csv(output_csv, index=False)
+        print(f"\n✅ Batch saved to {output_csv}")
+    except Exception as e:
+        print(f"\n[CRITICAL] Could not save to CSV: {e}")
+
+
+def print_summary(results: list):
+    """Print processing summary statistics."""
     print(f"\n📊 Summary:")
     print(f"   - Highly Eligible: {sum(1 for r in results if r.get('eligibility') == 'Highly Eligible')}")
     print(f"   - Eligible: {sum(1 for r in results if r.get('eligibility') == 'Eligible')}")
@@ -759,12 +772,61 @@ def reprocess_scraped_funds(batch_size: int = 10):
     print(f"   - Low Match: {sum(1 for r in results if r.get('eligibility') == 'Low Match')}")
     print(f"   - Not Eligible: {sum(1 for r in results if r.get('eligibility') == 'Not Eligible')}")
     print(f"   - Errors: {sum(1 for r in results if r.get('error'))}")
+
+
+def display_menu():
+    """Display the main menu and get user choice."""
+    print("\n" + "="*60)
+    print("FUND PROCESSING SYSTEM")
+    print("="*60)
+    print("\nChoose an option:")
+    print("  1. Process new funds from CSV (scrape + LLM extraction)")
+    print("  2. Reprocess already-scraped funds (LLM extraction only)")
+    print("  3. Exit")
+    print("="*60)
     
-    remaining = len(fund_folders) - len(already_processed) - len(to_process)
-    if remaining > 0:
-        print(f"\n⏳ {remaining} funds remaining to process (run again to continue)")
+    while True:
+        choice = input("\nEnter your choice (1-3): ").strip()
+        if choice in ['1', '2', '3']:
+            return choice
+        print("❌ Invalid choice. Please enter 1, 2, or 3.")
+
+
+def main():
+    """Main entry point with interactive menu."""
+    
+    while True:
+        choice = display_menu()
+        
+        if choice == '1':
+            try:
+                batch_size = input("\nEnter batch size (default 5): ").strip()
+                batch_size = int(batch_size) if batch_size else 5
+            except ValueError:
+                print("⚠️  Invalid batch size. Using default: 5")
+                batch_size = 5
+            
+            process_new_funds(INPUT_CSV, OUTPUT_CSV, batch_size)
+            
+        elif choice == '2':
+            try:
+                batch_size = input("\nEnter batch size (default 10): ").strip()
+                batch_size = int(batch_size) if batch_size else 10
+            except ValueError:
+                print("⚠️  Invalid batch size. Using default: 10")
+                batch_size = 10
+            
+            reprocess_scraped_funds(INPUT_CSV, OUTPUT_CSV, batch_size)
+            
+        elif choice == '3':
+            print("\n👋 Exiting program. Goodbye!")
+            break
+        
+        cont = input("\n\nPress Enter to return to menu (or 'q' to quit): ").strip().lower()
+        if cont == 'q':
+            print("\n👋 Exiting program. Goodbye!")
+            break
 
 
 if __name__ == "__main__":
-    # Process 10 funds at a time - adjust batch_size as needed
-    reprocess_scraped_funds(batch_size=97)
+    main()

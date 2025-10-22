@@ -1,0 +1,6 @@
+*.log
+*.xlsx
+/Archive/
+/Scraped*/
+Detailed Funder Information - Grants Made*
+venv

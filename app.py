@@ -1,15 +1,24 @@
 # app.py
 # Streamlit web app for ellenor Hospice funding discovery tool
-# Converts the provided CLI script into a reactive, user-friendly UI.
+# (Refined navigation, API key vault, login/unlock, improved results table & error handling)
 
 import os, re, csv, time, json, requests, pandas as pd
 import streamlit as st
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urljoin
 from openai import OpenAI
-from typing import Dict, List, Tuple, Set, Callable, Optional
+from typing import Dict, List, Tuple, Set, Optional
 from pathlib import Path
 from datetime import datetime
+from base64 import urlsafe_b64encode, urlsafe_b64decode
+from hashlib import sha256
+
+# Try to use proper encryption if available
+try:
+    from cryptography.fernet import Fernet
+    CRYPTO_OK = True
+except Exception:
+    CRYPTO_OK = False
 
 # ==============================
 # ========== CONSTANTS =========
@@ -22,8 +31,12 @@ MAX_DISCOVERY_PAGES = 200
 PAUSE_BETWEEN_REQUESTS = 1.0
 HEADERS = {"User-Agent": "ellenor-funding-bot/priority/1.0 (+https://ellenor.org)"}
 OUTPUT_CSV = "funds_results_reprocessed.csv"
-INPUT_CSV = "funds.csv"  # still supported on Settings tab (optional helper)
+INPUT_CSV = "funds.csv"  # optional helper
 ELIGIBILITY_ORDER = ["Highly Eligible", "Eligible", "Possibly Eligible", "Low Match", "Not Eligible"]
+
+# Local Vault location (for API key persistence)
+VAULT_DIR = Path.home() / ".ellenor_funding"
+VAULT_PATH = VAULT_DIR / "vault.json"
 
 ELLENOR_PROFILE = {
     "name": "ellenor Hospice",
@@ -99,51 +112,12 @@ Return ONLY valid JSON with this exact structure:
   "evidence": "detailed explanation of eligibility determination with specific reasons"
 }
 
-=== ELIGIBILITY ASSESSMENT GUIDELINES ===
-
-**Highly Eligible** - Use when 4+ of these are true:
-- Hospices/palliative care organisations explicitly mentioned OR charities in health/care sector eligible
-- Geographic scope includes Kent/South East/UK-wide
-- Beneficiaries include palliative care patients, people with life-limiting conditions, children, families, or bereaved people
-- Funding amount suitable (£1k-£500k range)
-- Applications are open/rolling
-- No restrictions excluding hospices or healthcare charities
-
-**Eligible** - Use when 3+ criteria match:
-- Registered charities eligible (even if hospices not specifically mentioned)
-- Geographic scope includes England or broader regions including Kent
-- Beneficiaries include health, wellbeing, or vulnerable people
-- Reasonable funding available
-- Applications open or status unclear but likely available
-- No major restrictions
-
-**Possibly Eligible** - Use when 2+ criteria match or when:
-- Applicant type unclear but could include charities
-- Geographic scope broad enough to potentially include Kent
-- Beneficiary focus tangentially related (e.g., general community support)
-- Some restrictions but not directly excluding hospices
-
-**Low Match** - Use when:
-- Only 1 criterion matches
-- Geographic scope excludes Kent but includes UK
-- Beneficiary focus is very different but not explicitly excluding palliative care
-- Funding too small (<£1k) but still available
-
-**Not Eligible** - Use when ANY of these are true:
-- Applications closed/paused with no reopening date
-- Geographic scope explicitly excludes Kent/South East
-- Applicant types exclude charities or healthcare organizations
-- Restrictions explicitly exclude hospices, palliative care, or health services
-- Only for-profit organizations or individuals eligible
-
 === EVIDENCE GUIDELINES ===
 In the "evidence" field, provide a clear explanation including:
-1. Key matching factors (e.g., "Geographic scope includes Kent", "Explicitly welcomes hospice applications")
-2. Any concerns or limitations (e.g., "Competitive funding", "Deadline approaching")
+1. Key matching factors
+2. Concerns or limitations
 3. Specific quotes or facts from the page that support your assessment
-4. Overall recommendation or next steps
-
-Be specific and factual. Avoid generic statements.
+4. Overall recommendation
 
 === PAGE TEXT START ===
 {text}
@@ -177,37 +151,95 @@ KEYWORDS = ["grant", "grants", "apply", "fund", "funding", "eligible", "eligibil
 
 
 # ==========================================
-# ========== SESSION / API KEY UX ==========
+# ========== SESSION / NAVIGATION ==========
 # ==========================================
 
 def init_session():
     if "api_key" not in st.session_state:
-        # try environment only once for convenience; UI still preferred
         st.session_state.api_key = os.getenv("APIKEY") or os.getenv("OPENAI_API_KEY") or ""
     if "logs" not in st.session_state:
         st.session_state.logs = []
     if "last_run_results" not in st.session_state:
-        st.session_state.last_run_results = []  # list of dict rows
+        st.session_state.last_run_results = []
+    if "page" not in st.session_state:
+        st.session_state.page = "Scrape & Analyze"
+    if "unlocked" not in st.session_state:
+        st.session_state.unlocked = False  # “login” (passphrase unlock) state
 
 
-def set_api_key_ui():
+def set_sidebar_nav():
     with st.sidebar:
-        st.subheader("🔐 API Key")
-        st.write("Provide your OpenAI API key to enable LLM extraction.")
-        key = st.text_input("Enter your OpenAI API key", value=st.session_state.api_key, type="password")
-        col1, col2 = st.columns([1,1])
-        with col1:
-            if st.button("Save Key", use_container_width=True):
-                st.session_state.api_key = key.strip()
-                st.success("API key saved for this session.")
-        with col2:
-            if st.button("Clear Key", type="secondary", use_container_width=True):
-                st.session_state.api_key = ""
-                st.warning("API key cleared. Scraping will run without LLM extraction.")
+        st.title("ellenor Funding")
+        st.caption("Scrape → Analyze → Review results")
 
+        # Clear, simple nav (no radio widgets)
+        if st.button("🌐 Scrape & Analyze", use_container_width=True):
+            st.session_state.page = "Scrape & Analyze"
+        if st.button("📊 Results", use_container_width=True):
+            st.session_state.page = "Results"
+        if st.button("⚙️ Settings", use_container_width=True):
+            st.session_state.page = "Settings"
+
+        st.markdown("---")
+        # API Key status
+        key_status = "Loaded" if st.session_state.api_key.strip() else "Not set"
+        st.metric("API key", key_status)
+
+        # CSV location preview
+        st.caption("Results CSV")
+        st.code(str(Path(OUTPUT_CSV).resolve()), language="text")
+        if Path(OUTPUT_CSV).exists():
+            st.success("Results file found.")
+        else:
+            st.info("No results file yet.")
+        if st.button("Reveal results folder", use_container_width=True):
+            st.info(f"Directory: {Path(OUTPUT_CSV).resolve().parent}")
+
+
+# ==================================
+# ========== API KEY VAULT =========
+# ==================================
+
+def _derive_fernet_key(passphrase: str) -> bytes:
+    # Simple deterministic derivation (not PBKDF2, but avoids extra deps).
+    # We hash passphrase into 32 bytes and base64-url encode for Fernet.
+    h = sha256(passphrase.encode("utf-8")).digest()
+    return urlsafe_b64encode(h)
+
+def vault_save_api_key(passphrase: str, api_key: str):
+    VAULT_DIR.mkdir(parents=True, exist_ok=True)
+    payload: Dict[str, str]
+    if CRYPTO_OK:
+        fkey = _derive_fernet_key(passphrase)
+        f = Fernet(fkey)
+        token = f.encrypt(api_key.encode("utf-8")).decode("utf-8")
+        payload = {"method": "fernet", "ciphertext": token}
+    else:
+        # Fallback (not secure) – warn loudly
+        payload = {"method": "plain", "api_key": api_key}
+    VAULT_PATH.write_text(json.dumps(payload))
+
+def vault_load_api_key(passphrase: str) -> Optional[str]:
+    if not VAULT_PATH.exists():
+        return None
+    data = json.loads(VAULT_PATH.read_text())
+    method = data.get("method")
+    if method == "fernet" and CRYPTO_OK:
+        try:
+            fkey = _derive_fernet_key(passphrase)
+            f = Fernet(fkey)
+            token = data.get("ciphertext", "")
+            return f.decrypt(token.encode("utf-8")).decode("utf-8")
+        except Exception:
+            return None
+    elif method == "plain":
+        return data.get("api_key")
+    return None
+
+def vault_exists() -> bool:
+    return VAULT_PATH.exists()
 
 def get_client() -> Optional[OpenAI]:
-    """Create a fresh OpenAI client for each call, avoiding stale globals."""
     api_key = st.session_state.get("api_key", "").strip()
     if not api_key:
         return None
@@ -237,7 +269,6 @@ def normalize_url(url: str) -> str:
     return f"{scheme}://{netloc}{path}{qs}"
 
 def _log(msg: str, level: str = "info"):
-    """Accumulate logs & render immediately."""
     st.session_state.logs.append((level, msg))
     if level == "error":
         st.error(msg)
@@ -262,7 +293,7 @@ def fetch_page(url: str, retries: int = 4, backoff_factor: int = 2) -> Optional[
         except requests.exceptions.RequestException as e:
             if attempt < retries - 1:
                 pause = (backoff_factor ** attempt) * 2
-                _log(f"Fetch failed for {url} ({e}); retrying in {pause}s", "warning")
+                _log(f"Fetch failed: {url} ({e}); retrying in {pause}s", "warning")
                 time.sleep(pause)
             else:
                 _log(f"Fetch failed for {url}: {e}", "error")
@@ -383,10 +414,8 @@ def prioritized_crawl(seed_url: str) -> Tuple[str, str, int, List[str]]:
     return combined_text, domain_folder, len(all_text), top_links
 
 def call_llm_extract(text: str) -> Dict:
-    """Extract structured data including LLM-determined eligibility."""
     client = get_client()
     if client is None:
-        # LLM disabled – return placeholder
         return {
             "applicant_types": "",
             "geographic_scope": "",
@@ -438,7 +467,6 @@ def call_llm_extract(text: str) -> Dict:
             _log(f"Invalid eligibility value from LLM: {normalized['eligibility']}; defaulting to 'Low Match'", "warning")
             normalized["eligibility"] = "Low Match"
 
-        # Convert lists to strings for CSV storage
         for key in ["applicant_types", "beneficiary_focus", "restrictions"]:
             if isinstance(normalized[key], list):
                 normalized[key] = "; ".join(normalized[key]) if normalized[key] else ""
@@ -485,7 +513,6 @@ def load_results_csv(path: str = OUTPUT_CSV) -> pd.DataFrame:
         return pd.DataFrame(columns=CSV_COLUMNS)
     try:
         df = pd.read_csv(path)
-        # ensure all expected columns exist
         for col in CSV_COLUMNS:
             if col not in df.columns:
                 df[col] = ""
@@ -512,7 +539,6 @@ def get_scraped_domains(save_dir: str = SAVE_DIR) -> Set[str]:
     return scraped
 
 def save_results_to_csv(results: List[dict], output_csv: str = OUTPUT_CSV):
-    """Append-safe write with column alignment."""
     if not results:
         return
     results_df = pd.DataFrame(results)
@@ -520,13 +546,11 @@ def save_results_to_csv(results: List[dict], output_csv: str = OUTPUT_CSV):
         if col not in results_df.columns:
             results_df[col] = ""
     results_df = results_df[CSV_COLUMNS]
-    # Basic single-writer semantics for Streamlit:
     os.makedirs(os.path.dirname(output_csv) or ".", exist_ok=True)
     if os.path.exists(output_csv):
         results_df.to_csv(output_csv, mode="a", index=False, header=False)
     else:
         results_df.to_csv(output_csv, index=False)
-    # Invalidate cache
     load_results_csv.clear()
     get_already_processed_urls.clear()
 
@@ -565,16 +589,15 @@ def process_single_fund(url: str, fund_name: Optional[str] = None) -> dict:
     }
     try:
         text, folder, pages_scraped, visited_urls = prioritized_crawl(url)
-        _log(f"✅ Crawled {pages_scraped} pages. Saved in `{folder}`", "success")
         if not text or len(text) < 100:
             result["error"] = "Insufficient text extracted"
+            _log(f"Insufficient text extracted for {url}", "warning")
             return result
         data = call_llm_extract(text)
         result.update(data)
         result["pages_scraped"] = pages_scraped
         result["visited_urls_count"] = len(visited_urls)
         result["error"] = ""
-        # Save per-fund CSV
         try:
             single_df = pd.DataFrame([result])
             for col in CSV_COLUMNS:
@@ -587,39 +610,19 @@ def process_single_fund(url: str, fund_name: Optional[str] = None) -> dict:
         except Exception as e:
             _log(f"Could not write individual CSV for {fund_name}: {e}", "warning")
     except Exception as e:
-        _log(f"Processing failed for {url}: {e}", "error")
-        result["error"] = str(e)
+        # Friendly error mapping
+        msg = str(e)
+        if "Name or service not known" in msg or "Failed to establish a new connection" in msg:
+            _log(f"Network error contacting {url}: {msg}", "error")
+        else:
+            _log(f"Processing failed for {url}: {msg}", "error")
+        result["error"] = msg
     return result
 
 
 # ===============================
 # ========== UI PAGES ===========
 # ===============================
-
-def page_home():
-    st.title("ellenor Funding Discovery")
-    st.caption("Scrape funding sites → analyze eligibility → capture evidence.")
-    st.markdown("""
-    **What this app does**
-    - Crawls funding programme websites (with focused, keyword-led link discovery).
-    - Extracts page text and asks an LLM to *structure* key details and classify ellenor Hospice’s **eligibility**.
-    - Stores and visualises results so your team can quickly spot strong matches.
-
-    **Features**
-    - 📊 Past results with filters, search, summary metrics, and CSV download  
-    - 🌐 Smart scraping of new URLs or a CSV upload (skips duplicates automatically)  
-    - 🤖 LLM-powered extraction & eligibility classification, with on-page evidence  
-    - 🧰 JSON preview (optional) & per-fund text preview (optional)  
-    - 🔒 API key managed safely in your session (not saved to disk)
-
-    **Disclaimer**
-    - This tool uses the OpenAI API for text extraction & analysis **only when you provide a key**.  
-    - No fund page content or results are sent anywhere else; results are stored locally in CSVs and in the `Scraped/` folder.  
-    - Always validate eligibility against the original funder guidance before applying.
-    """)
-    with st.expander("About ellenor profile used for matching"):
-        st.json(ELLENOR_PROFILE)
-
 
 def _eligibility_color(val: str) -> str:
     palette = {
@@ -630,10 +633,6 @@ def _eligibility_color(val: str) -> str:
         "Not Eligible": "#dc2626"      # red
     }
     return palette.get(val, "#6b7280")
-
-def _style_eligibility(df: pd.DataFrame) -> pd.DataFrame:
-    if "eligibility" not in df.columns: return df
-    return df.style.map(lambda v: f"color: {_eligibility_color(v)}; font-weight:600" if v in ELIGIBILITY_ORDER else "" , subset=["eligibility"])
 
 def _results_metrics(df: pd.DataFrame):
     total = len(df)
@@ -649,64 +648,99 @@ def _results_metrics(df: pd.DataFrame):
         [col2, col3, col4, col5][idx].metric(label, count)
 
 def page_results():
-    st.title("📊 Past Results")
-    df = load_results_csv(OUTPUT_CSV)
+    st.title("📊 Results")
+    st.caption("Browse, filter, and export analyzed funds. Click URLs to open funding pages.")
 
+    df = load_results_csv(OUTPUT_CSV)
     if df.empty:
-        st.info("No results found yet. Run a scrape from the **Scrape & Analyze** page.")
+        st.info("No results yet. Use **Scrape & Analyze** to add funds.")
         return
 
-    # Quick filters
+    # Reorder: fund_url → eligibility → fund_name → rest
+    ordered_cols = (
+        ["fund_url", "eligibility", "fund_name",
+         "application_status", "deadline", "funding_range",
+         "geographic_scope", "applicant_types", "beneficiary_focus",
+         "restrictions", "notes", "evidence",
+         "pages_scraped", "visited_urls_count", "extraction_timestamp", "error"]
+    )
+    df = df[[c for c in ordered_cols if c in df.columns]]
+
+    # Filters
     with st.expander("Filters", expanded=True):
-        elig_filter = st.multiselect("Filter by eligibility", ELIGIBILITY_ORDER, default=ELIGIBILITY_ORDER)
-        keyword = st.text_input("Search keyword (URL, name, notes, evidence)")
-        filtered = df.copy()
+        elig_filter = st.multiselect("Eligibility", ELIGIBILITY_ORDER, default=ELIGIBILITY_ORDER)
+        keyword = st.text_input("Keyword (URL, name, notes, evidence)")
+        f = df.copy()
         if elig_filter:
-            filtered = filtered[filtered["eligibility"].isin(elig_filter)]
+            f = f[f["eligibility"].isin(elig_filter)]
         if keyword.strip():
-            kw = keyword.strip().lower()
+            kw = keyword.lower()
             mask = (
-                filtered["fund_url"].fillna("").str.lower().str.contains(kw) |
-                filtered["fund_name"].fillna("").str.lower().str.contains(kw) |
-                filtered["notes"].fillna("").str.lower().str.contains(kw) |
-                filtered["evidence"].fillna("").str.lower().str.contains(kw)
+                f["fund_url"].fillna("").str.lower().str.contains(kw) |
+                f["fund_name"].fillna("").str.lower().str.contains(kw) |
+                f["notes"].fillna("").str.lower().str.contains(kw) |
+                f["evidence"].fillna("").str.lower().str.contains(kw)
             )
-            filtered = filtered[mask]
+            f = f[mask]
 
-    _results_metrics(filtered)
+    _results_metrics(f)
 
-    st.dataframe(filtered, use_container_width=True, height=420)
+    # Clickable links & nicer column labels
+    colcfg = {
+        "fund_url": st.column_config.LinkColumn("Fund URL", display_text="Open"),
+        "eligibility": st.column_config.TextColumn("Eligibility"),
+        "fund_name": st.column_config.TextColumn("Fund Name"),
+        "application_status": st.column_config.TextColumn("Status"),
+        "deadline": st.column_config.TextColumn("Deadline"),
+        "funding_range": st.column_config.TextColumn("Funding Range"),
+        "geographic_scope": st.column_config.TextColumn("Scope"),
+        "applicant_types": st.column_config.TextColumn("Applicant Types"),
+        "beneficiary_focus": st.column_config.TextColumn("Beneficiaries"),
+        "restrictions": st.column_config.TextColumn("Restrictions"),
+        "notes": st.column_config.TextColumn("Notes"),
+        "evidence": st.column_config.TextColumn("Evidence"),
+        "pages_scraped": st.column_config.NumberColumn("Pages"),
+        "visited_urls_count": st.column_config.NumberColumn("Links Visited"),
+        "extraction_timestamp": st.column_config.TextColumn("Extracted At"),
+        "error": st.column_config.TextColumn("Error")
+    }
+
+    st.dataframe(f, use_container_width=True, height=480, column_config=colcfg)
+
     st.download_button(
-        "Download CSV",
-        data=filtered.to_csv(index=False).encode("utf-8"),
+        "Download Filtered CSV",
+        data=f.to_csv(index=False).encode("utf-8"),
         file_name="funds_results_filtered.csv",
         mime="text/csv"
     )
 
-    # Optional evidence preview
-    with st.expander("Show evidence details per fund"):
-        for _, row in filtered.iterrows():
+    with st.expander("Evidence details"):
+        for _, row in f.iterrows():
             color = _eligibility_color(row.get("eligibility",""))
-            st.markdown(f"**{row.get('fund_name','(unknown)')}** — "
-                        f"[{row.get('fund_url','')}]({row.get('fund_url','')}) "
-                        f"· <span style='color:{color};font-weight:600'>{row.get('eligibility','')}</span>",
-                        unsafe_allow_html=True)
-            st.caption(f"Application status: {row.get('application_status','')} · Deadline: {row.get('deadline','')}")
+            st.markdown(
+                f"**{row.get('fund_name','(unknown)')}** — "
+                f"[{row.get('fund_url','')}]({row.get('fund_url','')}) · "
+                f"<span style='color:{color};font-weight:600'>{row.get('eligibility','')}</span>",
+                unsafe_allow_html=True
+            )
+            st.caption(f"Status: {row.get('application_status','')} · Deadline: {row.get('deadline','')}")
             st.write(row.get("evidence","") or "_No evidence captured_")
             st.divider()
 
 
 def page_scrape():
     st.title("🌐 Scrape & Analyze")
+    st.caption("Paste URLs or upload a CSV with `fund_url`. We’ll skip items already processed or scraped.")
 
-    api_ok = bool(st.session_state.get("api_key", "").strip())
-    if not api_ok:
-        st.warning("An OpenAI API key is not set. Scraping can still run, but LLM extraction will be **skipped** and eligibility will default to a low-confidence placeholder.")
-        st.info("Set your key from the left sidebar.")
+    # API key helper
+    if not st.session_state.api_key.strip():
+        st.warning("OpenAI API key not set. Scraping will run, but LLM extraction will be skipped (eligibility = low-confidence).")
+        with st.expander("How to enable LLM extraction"):
+            st.write("Go to **Settings → API Key** to enter a key, or unlock from your Local Vault.")
 
     st.subheader("Provide funding URLs")
-    urls_text = st.text_area("Paste one or more URLs (one per line)", height=130, placeholder="https://funder.org/grants\nhttps://another.org/funding-programme")
-    st.write("OR upload a CSV that contains a `fund_url` column.")
+    urls_text = st.text_area("One per line", height=120, placeholder="https://funder.org/grants\nhttps://another.org/funding-programme")
+    st.write("**Or** upload a CSV that contains a `fund_url` column.")
     up = st.file_uploader("Upload CSV", type=["csv"])
 
     input_urls: List[str] = []
@@ -723,18 +757,17 @@ def page_scrape():
             st.error(f"Could not read uploaded CSV: {e}")
 
     input_urls = [normalize_url(u) for u in input_urls]
-    input_urls = list(dict.fromkeys(input_urls))  # de-duplicate order-preserving
+    input_urls = list(dict.fromkeys(input_urls))  # dedupe
 
     if not input_urls:
         st.info("Add URLs or upload a CSV to proceed.")
         return
 
-    st.subheader("De-duplication check")
+    st.subheader("Duplicate check")
     processed_urls = get_already_processed_urls(OUTPUT_CSV)
     scraped_domains = get_scraped_domains(SAVE_DIR)
 
-    will_skip = []
-    will_process = []
+    will_skip, will_process = [], []
     for u in input_urls:
         domain_key = safe_filename_from_url(u).lower()
         if u in processed_urls:
@@ -755,79 +788,114 @@ def page_scrape():
             for u in will_process:
                 st.write(f"- {u}")
 
-    start = st.button("🚀 Start Scraping", type="primary", use_container_width=True, disabled=len(will_process)==0)
-
-    if not start:
+    go = st.button("🚀 Start", type="primary", use_container_width=True, disabled=len(will_process)==0)
+    if not go:
         return
 
-    # Run scraping + LLM extraction with visible progress and logs
-    st.session_state.logs = []  # reset logs
+    # Clear logs and prep trackers
+    st.session_state.logs = []
     progress = st.progress(0)
     status = st.empty()
     results: List[dict] = []
+    errs = []
 
     os.makedirs(SAVE_DIR, exist_ok=True)
 
     for i, url in enumerate(will_process, start=1):
         status.info(f"Processing {i}/{len(will_process)} — {url}")
-        with st.spinner(f"Crawling and analyzing: {url}"):
-            res = process_single_fund(url)
-            results.append(res)
-            # Per-fund result preview
-            with st.expander(f"Result: {res.get('fund_name') or url}", expanded=False):
+        try:
+            with st.spinner(f"Crawling and analyzing: {url}"):
+                res = process_single_fund(url)
+                results.append(res)
                 if res.get("error"):
-                    st.error(res["error"])
-                else:
-                    c1, c2, c3 = st.columns([2,1,1])
-                    with c1:
-                        st.markdown(f"**URL:** [{res.get('fund_url','')}]({res.get('fund_url','')})")
-                        st.markdown(f"**Funding range:** {res.get('funding_range','')}")
-                        st.markdown(f"**Scope:** {res.get('geographic_scope','')}")
-                    with c2:
-                        st.metric("Pages scraped", int(res.get("pages_scraped") or 0))
-                        st.metric("Links visited", int(res.get("visited_urls_count") or 0))
-                    with c3:
-                        color = _eligibility_color(res.get("eligibility",""))
-                        st.markdown(f"**Eligibility**")
-                        st.markdown(f"<span style='color:{color};font-weight:700'>{res.get('eligibility','')}</span>", unsafe_allow_html=True)
+                    errs.append((url, res["error"]))
 
-                    with st.expander("Evidence", expanded=False):
-                        st.write(res.get("evidence", "") or "_No evidence recorded_")
-                    with st.expander("Notes / Restrictions / Applicant types", expanded=False):
-                        st.write(f"**Notes:** {res.get('notes','')}")
-                        st.write(f"**Restrictions:** {res.get('restrictions','')}")
-                        st.write(f"**Applicant types:** {res.get('applicant_types','')}")
-                    with st.expander("Raw JSON (from LLM)", expanded=False):
-                        raw = {k: res.get(k, "") for k in [
-                            "applicant_types","geographic_scope","beneficiary_focus",
-                            "funding_range","restrictions","application_status",
-                            "deadline","notes","eligibility","evidence"
-                        ]}
-                        st.json(raw)
+                # Per-fund preview
+                with st.expander(f"Result: {res.get('fund_name') or url}", expanded=False):
+                    if res.get("error"):
+                        st.error(res["error"])
+                    else:
+                        c1, c2, c3 = st.columns([2,1,1])
+                        with c1:
+                            st.markdown(f"**URL:** [{res.get('fund_url','')}]({res.get('fund_url','')})")
+                            st.markdown(f"**Funding range:** {res.get('funding_range','')}")
+                            st.markdown(f"**Scope:** {res.get('geographic_scope','')}")
+                        with c2:
+                            st.metric("Pages scraped", int(res.get("pages_scraped") or 0))
+                            st.metric("Links visited", int(res.get("visited_urls_count") or 0))
+                        with c3:
+                            color = _eligibility_color(res.get("eligibility",""))
+                            st.markdown("**Eligibility**")
+                            st.markdown(f"<span style='color:{color};font-weight:700'>{res.get('eligibility','')}</span>", unsafe_allow_html=True)
 
-            # Append to master CSV as we go (also populates individual per-fund CSV in process_single_fund)
-            try:
-                save_results_to_csv([res], OUTPUT_CSV)
-            except Exception as e:
-                st.error(f"Could not save to master CSV: {e}")
+                        with st.expander("Evidence", expanded=False):
+                            st.write(res.get("evidence", "") or "_No evidence recorded_")
+                        with st.expander("Notes / Restrictions / Applicant types", expanded=False):
+                            st.write(f"**Notes:** {res.get('notes','')}")
+                            st.write(f"**Restrictions:** {res.get('restrictions','')}")
+                            st.write(f"**Applicant types:** {res.get('applicant_types','')}")
+
+                # Append to master CSV as we go
+                try:
+                    save_results_to_csv([res], OUTPUT_CSV)
+                except Exception as e:
+                    st.error(f"Could not save to master CSV: {e}")
+
+        except Exception as e:
+            errs.append((url, str(e)))
+            st.error(f"Unexpected error on {url}: {e}")
 
         progress.progress(int(i/len(will_process)*100))
 
-    status.success("Scraping & analysis complete.")
-    st.session_state.last_run_results = results
+    status.success("Done.")
 
-    # Display batch summary and table of new results
-    st.subheader("Batch Summary")
+    # Error summary (cleaner, grouped)
+    if errs:
+        st.subheader("Issues encountered")
+        grouped = {}
+        for u, e in errs:
+            key = "Network" if any(k in e for k in ["Name or service", "Failed to establish", "timeout"]) else \
+                  "Access/HTTP" if any(k in e for k in ["403", "404", "429", "5"]) else \
+                  "Other"
+            grouped.setdefault(key, []).append((u, e))
+        for g, items in grouped.items():
+            with st.expander(f"{g} errors ({len(items)})", expanded=False):
+                for u, e in items:
+                    st.write(f"• **{u}** — {e}")
+
+    # Batch table
+    st.subheader("This batch")
     df_new = pd.DataFrame(results)
     if not df_new.empty:
-        # Ensure columns present
         for col in CSV_COLUMNS:
             if col not in df_new.columns:
                 df_new[col] = ""
-        df_new = df_new[CSV_COLUMNS]
-        # Metrics
-        _results_metrics(df_new)
-        st.dataframe(df_new, use_container_width=True, height=420)
+        # reorder like Results page
+        ordered_cols = ["fund_url", "eligibility", "fund_name", "application_status", "deadline",
+                        "funding_range", "geographic_scope", "applicant_types", "beneficiary_focus",
+                        "restrictions", "notes", "evidence",
+                        "pages_scraped", "visited_urls_count", "extraction_timestamp", "error"]
+        df_new = df_new[[c for c in ordered_cols if c in df_new.columns]]
+
+        colcfg = {
+            "fund_url": st.column_config.LinkColumn("Fund URL", display_text="Open"),
+            "eligibility": st.column_config.TextColumn("Eligibility"),
+            "fund_name": st.column_config.TextColumn("Fund Name"),
+            "application_status": st.column_config.TextColumn("Status"),
+            "deadline": st.column_config.TextColumn("Deadline"),
+            "funding_range": st.column_config.TextColumn("Funding Range"),
+            "geographic_scope": st.column_config.TextColumn("Scope"),
+            "applicant_types": st.column_config.TextColumn("Applicant Types"),
+            "beneficiary_focus": st.column_config.TextColumn("Beneficiaries"),
+            "restrictions": st.column_config.TextColumn("Restrictions"),
+            "notes": st.column_config.TextColumn("Notes"),
+            "evidence": st.column_config.TextColumn("Evidence"),
+            "pages_scraped": st.column_config.NumberColumn("Pages"),
+            "visited_urls_count": st.column_config.NumberColumn("Links Visited"),
+            "extraction_timestamp": st.column_config.TextColumn("Extracted At"),
+            "error": st.column_config.TextColumn("Error")
+        }
+        st.dataframe(df_new, use_container_width=True, height=420, column_config=colcfg)
         st.download_button(
             "Download This Batch (CSV)",
             data=df_new.to_csv(index=False).encode("utf-8"),
@@ -837,114 +905,73 @@ def page_scrape():
     else:
         st.info("No results produced.")
 
-    # Live logs
-    if st.session_state.logs:
-        with st.expander("Logs"):
-            for level, msg in st.session_state.logs:
-                if level == "error": st.error(msg)
-                elif level == "warning": st.warning(msg)
-                elif level == "success": st.success(msg)
-                else: st.write(msg)
-
 
 def page_settings():
-    st.title("⚙️ Settings & Utilities")
+    st.title("⚙️ Settings")
+    st.caption("Manage API key, Local Vault, and utilities.")
 
     st.subheader("API Key")
-    st.write("You can also manage your key from the sidebar.")
-    key = st.text_input("OpenAI API key", value=st.session_state.api_key, type="password")
+    st.write("Set an OpenAI API key for LLM extraction.")
+    key = st.text_input("OpenAI API key", value=st.session_state.api_key, type="password", help="Used only in this session unless saved to Local Vault.")
     b1, b2 = st.columns([1,1])
     with b1:
-        if st.button("Save Key", use_container_width=True):
+        if st.button("Save to Session", use_container_width=True):
             st.session_state.api_key = key.strip()
-            st.success("API key saved for this session.")
+            st.success("API key saved to session.")
     with b2:
-        if st.button("Clear Key", type="secondary", use_container_width=True):
+        if st.button("Clear from Session", type="secondary", use_container_width=True):
             st.session_state.api_key = ""
-            st.warning("API key cleared.")
+            st.warning("API key cleared from session.")
 
-    st.subheader("Data Locations")
-    st.write(f"- Results CSV: `{OUTPUT_CSV}`")
-    st.write(f"- Scraped text folder: `{SAVE_DIR}/`")
-    st.caption("These paths are on your local machine / server where Streamlit runs.")
-
-    st.subheader("Optional: Process pre-scraped folders (LLM-only reprocess)")
-    st.write("If you previously scraped sites (TXT files saved in `Scraped/`), you can run LLM extraction again without crawling.")
-    if not os.path.exists(SAVE_DIR):
-        st.info("No `Scraped/` directory found yet.")
-        return
-
-    # Aid: Load from INPUT_CSV (if present) to select subset
-    input_csv_exists = os.path.exists(INPUT_CSV)
-    use_input = st.checkbox("Use input list from funds.csv (if present)", value=input_csv_exists)
-    selected_folders = []
-
-    if use_input and input_csv_exists:
-        try:
-            df_in = pd.read_csv(INPUT_CSV)
-            if "fund_url" in df_in.columns:
-                st.caption(f"Loaded {len(df_in)} rows from {INPUT_CSV}. Only those with scraped folders will be considered.")
-                # Filter to those with folders
-                candidates = []
-                for u in df_in["fund_url"].dropna().astype(str).tolist():
-                    folder = os.path.join(SAVE_DIR, safe_filename_from_url(u))
-                    if os.path.isdir(folder):
-                        candidates.append((u, folder))
-                urls_to_reprocess = [c[0] for c in candidates]
-                pick = st.multiselect("Choose funds to reprocess", urls_to_reprocess, default=urls_to_reprocess[:10])
-                selected_folders = [os.path.join(SAVE_DIR, safe_filename_from_url(u)) for u in pick]
-            else:
-                st.warning("`funds.csv` must include a `fund_url` column.")
-        except Exception as e:
-            st.error(f"Could not read {INPUT_CSV}: {e}")
+    st.markdown("---")
+    st.subheader("🔐 Local Vault (persist key across refresh/restart)")
+    if CRYPTO_OK:
+        st.caption("Your key is encrypted using a passphrase (Fernet).")
     else:
-        # list all scraped folders
-        all_folders = [f for f in os.listdir(SAVE_DIR) if os.path.isdir(os.path.join(SAVE_DIR, f))]
-        if not all_folders:
-            st.info("No scraped folders to reprocess.")
-        else:
-            pick = st.multiselect("Choose scraped folders", all_folders, default=all_folders[:10])
-            selected_folders = [os.path.join(SAVE_DIR, f) for f in pick]
+        st.caption("cryptography not installed — will store **plain text** (not recommended). `pip install cryptography` to enable encryption.")
 
-    if st.button("Run LLM extraction on selected folders", disabled=len(selected_folders)==0):
-        if not st.session_state.api_key.strip():
-            st.error("Please set your OpenAI API key first.")
-            return
-        results = []
-        progress = st.progress(0)
-        for i, folder in enumerate(selected_folders, start=1):
-            combined_text, file_count, fund_url_guess = load_text_from_folder(folder)
-            if not combined_text or len(combined_text) < 100:
-                st.warning(f"Insufficient text in {folder} ({len(combined_text)} chars)")
-                continue
-            data = call_llm_extract(combined_text)
-            row = {
-                "fund_url": fund_url_guess or "",
-                "fund_name": os.path.basename(folder),
-                "extraction_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "pages_scraped": file_count,
-                "visited_urls_count": file_count,
-                "error": ""
-            }
-            row.update(data)
-            results.append(row)
-            # Write per-folder CSV
+    colA, colB = st.columns(2)
+    with colA:
+        passphrase = st.text_input("App Passphrase", type="password", help="Used to encrypt/decrypt the API key on this machine.")
+    with colB:
+        st.write("")
+        if st.button("Save API key to Local Vault", use_container_width=True, disabled=not passphrase or not key.strip()):
             try:
-                df_one = pd.DataFrame([row])
-                for col in CSV_COLUMNS:
-                    if col not in df_one.columns:
-                        df_one[col] = ""
-                df_one = df_one[CSV_COLUMNS]
-                Path(folder, "fund_result.csv").write_text(df_one.to_csv(index=False))
+                vault_save_api_key(passphrase, key.strip())
+                st.success(f"Saved to {VAULT_PATH}")
             except Exception as e:
-                st.warning(f"Could not write individual CSV in {folder}: {e}")
-            progress.progress(int(i/len(selected_folders)*100))
-        if results:
-            save_results_to_csv(results, OUTPUT_CSV)
-            st.success(f"Saved {len(results)} new LLM result(s) to {OUTPUT_CSV}")
-            st.dataframe(pd.DataFrame(results), use_container_width=True, height=420)
-        else:
-            st.info("No results created.")
+                st.error(f"Failed to save: {e}")
+
+    colC, colD = st.columns(2)
+    with colC:
+        unlock_pw = st.text_input("Unlock with Passphrase", type="password")
+    with colD:
+        st.write("")
+        if st.button("Unlock & Load Key", use_container_width=True, disabled=not unlock_pw or not vault_exists()):
+            loaded = vault_load_api_key(unlock_pw)
+            if loaded:
+                st.session_state.api_key = loaded
+                st.session_state.unlocked = True
+                st.success("Key loaded into session.")
+            else:
+                st.error("Unlock failed. Check your passphrase or vault availability.")
+
+    if vault_exists():
+        st.info(f"Vault file: `{VAULT_PATH}`")
+        if st.button("Delete Local Vault", use_container_width=True):
+            try:
+                VAULT_PATH.unlink(missing_ok=True)
+                st.success("Vault deleted.")
+            except Exception as e:
+                st.error(f"Could not delete vault: {e}")
+    else:
+        st.info("No Local Vault found yet.")
+
+    st.markdown("---")
+    st.subheader("Data Locations")
+    st.write(f"- Results CSV: `{Path(OUTPUT_CSV).resolve()}`")
+    st.write(f"- Scraped text folder: `{Path(SAVE_DIR).resolve()}/`")
+    st.caption("Paths are on the machine where Streamlit is running.")
 
 
 # ===============================
@@ -954,23 +981,15 @@ def page_settings():
 def main():
     st.set_page_config(page_title="ellenor Funding Discovery", page_icon="🌿", layout="wide")
     init_session()
-    set_api_key_ui()
+    set_sidebar_nav()
 
-    with st.sidebar:
-        st.header("Navigation")
-        page = st.radio("Go to", ["Home", "Results", "Scrape & Analyze", "Settings"], index=0)
-        st.markdown("---")
-        st.caption("Tip: Use the **Scrape & Analyze** page to add new funds. "
-                   "Processed results appear instantly on the **Results** page.")
-
-    if page == "Home":
-        page_home()
-    elif page == "Results":
+    page = st.session_state.page
+    if page == "Results":
         page_results()
-    elif page == "Scrape & Analyze":
-        page_scrape()
     elif page == "Settings":
         page_settings()
+    else:
+        page_scrape()  # default / main flow
 
 if __name__ == "__main__":
     main()

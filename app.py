@@ -502,6 +502,30 @@ def call_llm_extract(text: str) -> Dict:
             "evidence": f"Error: LLM extraction failed - {str(e)}"
         }
 
+# --- Scraped manager helpers ---
+
+def list_scraped_folders(save_dir: str = SAVE_DIR) -> List[str]:
+    if not os.path.exists(save_dir):
+        return []
+    return sorted([d for d in os.listdir(save_dir) if os.path.isdir(os.path.join(save_dir, d))])
+
+def delete_scraped_folder(folder_name: str, save_dir: str = SAVE_DIR) -> bool:
+    try:
+        import shutil
+        path = os.path.join(save_dir, folder_name)
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+            # Clear caches that depend on this listing
+            get_scraped_domains.clear()
+            return True
+    except Exception:
+        pass
+    return False
+
+def folder_name_for_url(u: str) -> str:
+    # consistent with safe_filename_from_url(normalized_url)
+    return safe_filename_from_url(normalize_url(u))
+
 
 # ====================================
 # ========== CSV / CACHE LAYER =======
@@ -687,7 +711,7 @@ def page_results():
 
     # Clickable links & nicer column labels
     colcfg = {
-        "fund_url": st.column_config.LinkColumn("Fund URL", display_text="Open"),
+        "fund_url": st.column_config.LinkColumn("Fund URL"),
         "eligibility": st.column_config.TextColumn("Eligibility"),
         "fund_name": st.column_config.TextColumn("Fund Name"),
         "application_status": st.column_config.TextColumn("Status"),
@@ -762,6 +786,10 @@ def page_scrape():
     if not input_urls:
         st.info("Add URLs or upload a CSV to proceed.")
         return
+    
+
+    force_rescrape = st.checkbox("Force re-scrape even if a folder exists", value=False, help="Ignores the 'already scraped' skip. Useful when you want a fresh crawl.")
+    purge_before_rescrape = st.checkbox("Purge existing folder before force re-scrape", value=False, help="Deletes the old scraped folder first (safer to avoid mixing old/new pages).")
 
     st.subheader("Duplicate check")
     processed_urls = get_already_processed_urls(OUTPUT_CSV)
@@ -769,13 +797,20 @@ def page_scrape():
 
     will_skip, will_process = [], []
     for u in input_urls:
-        domain_key = safe_filename_from_url(u).lower()
-        if u in processed_urls:
+        domain_key = folder_name_for_url(u).lower()
+        if u in processed_urls and not force_rescrape:
             will_skip.append((u, "Already in results CSV"))
-        elif domain_key in scraped_domains:
+        elif (domain_key in scraped_domains) and not force_rescrape:
             will_skip.append((u, "Already scraped (folder exists)"))
         else:
+            # If forcing, optionally purge the old folder
+            if force_rescrape and (domain_key in scraped_domains) and purge_before_rescrape:
+                if delete_scraped_folder(domain_key, SAVE_DIR):
+                    st.info(f"Purged existing scraped folder for {u}")
+                else:
+                    st.warning(f"Could not purge scraped folder for {u}; continuing anyway.")
             will_process.append(u)
+
 
     if will_skip:
         with st.expander("Skipped (to save time & cost)", expanded=True):
@@ -904,6 +939,51 @@ def page_scrape():
         )
     else:
         st.info("No results produced.")
+            
+    st.markdown("---")
+    st.subheader("🔁 Reprocess from scraped text (LLM only)")
+    st.caption("Reads text files already in `Scraped/` and re-runs the LLM extractor without re-crawling.")
+
+    folders = list_scraped_folders(SAVE_DIR)
+    if not folders:
+        st.info("No scraped folders found yet.")
+    else:
+        pick = st.selectbox("Choose a scraped folder", folders, index=0)
+        r1, r2 = st.columns([1,1])
+        with r1:
+            reprocess_now = st.button("Run LLM Extraction on Selected Folder", use_container_width=True)
+        with r2:
+            del_now = st.button("Delete Selected Folder", type="secondary", use_container_width=True)
+
+        if reprocess_now:
+            if not st.session_state.api_key.strip():
+                st.error("Please set your OpenAI API key first (Settings).")
+            else:
+                full_path = os.path.join(SAVE_DIR, pick)
+                combined_text, file_count, url_guess = load_text_from_folder(full_path)
+                if not combined_text or len(combined_text) < 100:
+                    st.warning(f"Insufficient text in {pick} ({len(combined_text)} chars).")
+                else:
+                    data = call_llm_extract(combined_text)
+                    row = {
+                        "fund_url": url_guess or "",
+                        "fund_name": pick,
+                        "extraction_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "pages_scraped": file_count,
+                        "visited_urls_count": file_count,
+                        "error": ""
+                    }
+                    row.update(data)
+                    save_results_to_csv([row], OUTPUT_CSV)
+                    st.success(f"Saved reprocessed result to {OUTPUT_CSV}")
+                    st.json({k: row.get(k) for k in ["fund_url","eligibility","application_status","deadline","funding_range","notes"]})
+
+        if del_now:
+            if delete_scraped_folder(pick, SAVE_DIR):
+                st.success(f"Deleted folder: {pick}")
+            else:
+                st.error("Could not delete folder. Check permissions.")
+
 
 
 def page_settings():

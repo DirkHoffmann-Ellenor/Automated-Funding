@@ -1059,7 +1059,7 @@ def page_settings():
 # ===============================
 
 def main():
-    st.set_page_config(page_title="ellenor Funding Discovery", page_icon="🌿", layout="wide")
+    st.set_page_config(page_title="ellenor Automated Funding Discovery", layout="wide")
     init_session()
     set_sidebar_nav()
 

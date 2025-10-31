@@ -114,5 +114,3 @@ if os.path.exists(OUTPUT_CSV):
 else:
     st.info("No results yet. Run a process to generate your first dataset.")
 
-st.sidebar.markdown("---")
-st.sidebar.info("Built for Ellenor Hospice by Dirk Hoffmann & GPT-5 🧠")

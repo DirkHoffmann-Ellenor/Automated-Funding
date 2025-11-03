@@ -821,7 +821,7 @@ def page_scrape():
         except Exception as e:
             st.error(f"Could not read uploaded CSV: {e}")
 
-    input_urls = [initial_normalize_url(u) for u in input_urls]
+    input_urls = [normalize_url(u) for u in input_urls]
     input_urls = list(dict.fromkeys(input_urls))  # dedupe
 
     if not input_urls:

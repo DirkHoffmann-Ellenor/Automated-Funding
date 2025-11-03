@@ -261,6 +261,7 @@ def safe_filename_from_url(url: str) -> str:
     return name[:150]
 
 def normalize_url(url: str) -> str:
+    """Simple normalization for deduplication within one domain."""
     parsed = urlparse(url)
     scheme = parsed.scheme or "https"
     netloc = parsed.netloc
@@ -269,45 +270,32 @@ def normalize_url(url: str) -> str:
     return f"{scheme}://{netloc}{path}{qs}"
 
 def initial_normalize_url(url: str) -> str:
-    """Normalize a URL for consistent crawling & deduplication."""
+    """
+    For initial seed URLs (user-provided), produce a base link to restrict crawling.
+    e.g. turns
+    https://register-of-charities.charitycommission.gov.uk/en/charity-search/-/charity-details/1010625/charity-overview?... 
+    into
+    https://register-of-charities.charitycommission.gov.uk/en/charity-search/-/charity-details/1010625
+    """
     url = url.strip()
     if not url:
         return url
 
     parsed = urlparse(url)
-
-    # --- fix scheme ---
     scheme = parsed.scheme or "https"
     netloc = parsed.netloc.lower().replace("www.", "")
-
-    # --- clean up path ---
     path = parsed.path or "/"
-    path = re.sub(r"/+$", "", path)  # remove trailing slashes
+    path = re.sub(r"/+$", "", path)
 
-    # Special case: Charity Commission URLs often have an ID after 'charity-details/'
-    # e.g. .../charity-details/1010625/charity-overview -> keep only /charity-details/1010625
+    # special case: Charity Commission pattern
     if "charitycommission.gov.uk" in netloc and "/charity-details/" in path:
+        # keep only the ID part
         match = re.search(r"(/charity-details/\d+)", path)
         if match:
-            path = match.group(1)
+            path = "/en/charity-search/-" + match.group(1)
 
-    # --- strip fragments ---
-    fragment = ""
-
-    # --- remove tracking query params ---
-    query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
-    clean_query = [(k, v) for (k, v) in query_pairs if not k.lower().startswith(("utm_", "fbclid", "gclid"))]
-    query = urlencode(clean_query)
-
-    # --- reconstruct canonical URL ---
-    normalized = urlunparse((scheme, netloc, path, "", query, fragment))
-
-    # For most cases, if the query is very long or mostly numeric noise, drop it entirely
-    if len(query) > 80 or any(ch in query for ch in ["=", "_"]):
-        normalized = f"{scheme}://{netloc}{path}"
-
+    normalized = f"{scheme}://{netloc}{path}"
     return normalized
-
 
 def _log(msg: str, level: str = "info"):
     st.session_state.logs.append((level, msg))
@@ -349,6 +337,11 @@ def extract_visible_text(html: str) -> str:
 
 def discover_links(seed_url: str, discovery_depth: int = DISCOVERY_DEPTH,
                    max_pages: int = MAX_DISCOVERY_PAGES) -> Dict:
+    """
+    Crawl only pages related to the same base entity (same charity ID or program).
+    For Charity Commission, restrict to links that start with the seed base path.
+    """
+    seed_base = initial_normalize_url(seed_url)
     seed_norm = normalize_url(seed_url)
     base_domain = urlparse(seed_norm).netloc.replace("www.", "")
     queue = [(seed_norm, 0)]
@@ -375,11 +368,18 @@ def discover_links(seed_url: str, discovery_depth: int = DISCOVERY_DEPTH,
             href = urljoin(url, a["href"].split("#")[0])
             if not href.startswith("http"):
                 continue
-            if base_domain not in urlparse(href).netloc:
+            parsed_href = urlparse(href)
+            if base_domain not in parsed_href.netloc:
                 continue
             if any(href.lower().endswith(ext) for ext in [".pdf", ".jpg", ".jpeg", ".png",
                                                            ".zip", ".mp4", ".doc", ".docx"]):
                 continue
+
+            # Restrict to links under the same base path for Charity Commission
+            if "charitycommission.gov.uk" in base_domain:
+                if not href.startswith(seed_base):
+                    continue
+
             hnorm = normalize_url(href)
             anchor = (a.get_text(" ", strip=True) or "").strip()
             meta = candidates.setdefault(hnorm, {
@@ -398,7 +398,7 @@ def discover_links(seed_url: str, discovery_depth: int = DISCOVERY_DEPTH,
 
         time.sleep(PAUSE_BETWEEN_REQUESTS)
 
-    _log(f"➕ Found {len(candidates)} internal links (visited {pages_visited} pages)")
+    _log(f"➕ Found {len(candidates)} internal links (visited {pages_visited} pages) from {seed_base}")
     return candidates
 
 def score_candidate(url: str, meta: Dict) -> int:
@@ -421,9 +421,12 @@ def score_candidate(url: str, meta: Dict) -> int:
     score += max(0, 10 - len(url) / 50)
     return score
 
+
 def prioritized_crawl(seed_url: str) -> Tuple[str, str, int, List[str]]:
+    """Crawl and prioritize only the related internal pages."""
+    seed_base = initial_normalize_url(seed_url)
     seed_norm = normalize_url(seed_url)
-    domain_folder = os.path.join(SAVE_DIR, safe_filename_from_url(seed_norm))
+    domain_folder = os.path.join(SAVE_DIR, safe_filename_from_url(seed_base))
     os.makedirs(domain_folder, exist_ok=True)
 
     candidates = discover_links(seed_norm)
@@ -436,7 +439,7 @@ def prioritized_crawl(seed_url: str) -> Tuple[str, str, int, List[str]]:
     scored.sort(reverse=True)
 
     top_links = [url for _, url in scored[:MAX_PAGES]]
-    _log(f"🌐 Fetching top {len(top_links)} links from {seed_norm}")
+    _log(f"🌐 Fetching top {len(top_links)} links from {seed_base}")
 
     all_text = []
     for i, url in enumerate(top_links, 1):

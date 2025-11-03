@@ -5,7 +5,7 @@
 import os, re, csv, time, json, requests, pandas as pd
 import streamlit as st
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode, urljoin
 from openai import OpenAI
 from typing import Dict, List, Tuple, Set, Optional
 from pathlib import Path

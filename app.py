@@ -260,8 +260,15 @@ def safe_filename_from_url(url: str) -> str:
     name = re.sub(r"[^a-zA-Z0-9._-]", "_", name)
     return name[:150]
 
-
 def normalize_url(url: str) -> str:
+    parsed = urlparse(url)
+    scheme = parsed.scheme or "https"
+    netloc = parsed.netloc
+    path = parsed.path.rstrip("/")
+    qs = ("?" + parsed.query) if parsed.query else ""
+    return f"{scheme}://{netloc}{path}{qs}"
+
+def initial_normalize_url(url: str) -> str:
     """Normalize a URL for consistent crawling & deduplication."""
     url = url.strip()
     if not url:
@@ -300,6 +307,7 @@ def normalize_url(url: str) -> str:
         normalized = f"{scheme}://{netloc}{path}"
 
     return normalized
+
 
 def _log(msg: str, level: str = "info"):
     st.session_state.logs.append((level, msg))
@@ -813,7 +821,7 @@ def page_scrape():
         except Exception as e:
             st.error(f"Could not read uploaded CSV: {e}")
 
-    input_urls = [normalize_url(u) for u in input_urls]
+    input_urls = [initial_normalize_url(u) for u in input_urls]
     input_urls = list(dict.fromkeys(input_urls))  # dedupe
 
     if not input_urls:

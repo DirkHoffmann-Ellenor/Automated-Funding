@@ -5,7 +5,7 @@
 import os, re, csv, time, json, requests, pandas as pd
 import streamlit as st
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 from openai import OpenAI
 from typing import Dict, List, Tuple, Set, Optional
 from pathlib import Path
@@ -260,13 +260,46 @@ def safe_filename_from_url(url: str) -> str:
     name = re.sub(r"[^a-zA-Z0-9._-]", "_", name)
     return name[:150]
 
+
 def normalize_url(url: str) -> str:
+    """Normalize a URL for consistent crawling & deduplication."""
+    url = url.strip()
+    if not url:
+        return url
+
     parsed = urlparse(url)
+
+    # --- fix scheme ---
     scheme = parsed.scheme or "https"
-    netloc = parsed.netloc
-    path = parsed.path.rstrip("/")
-    qs = ("?" + parsed.query) if parsed.query else ""
-    return f"{scheme}://{netloc}{path}{qs}"
+    netloc = parsed.netloc.lower().replace("www.", "")
+
+    # --- clean up path ---
+    path = parsed.path or "/"
+    path = re.sub(r"/+$", "", path)  # remove trailing slashes
+
+    # Special case: Charity Commission URLs often have an ID after 'charity-details/'
+    # e.g. .../charity-details/1010625/charity-overview -> keep only /charity-details/1010625
+    if "charitycommission.gov.uk" in netloc and "/charity-details/" in path:
+        match = re.search(r"(/charity-details/\d+)", path)
+        if match:
+            path = match.group(1)
+
+    # --- strip fragments ---
+    fragment = ""
+
+    # --- remove tracking query params ---
+    query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    clean_query = [(k, v) for (k, v) in query_pairs if not k.lower().startswith(("utm_", "fbclid", "gclid"))]
+    query = urlencode(clean_query)
+
+    # --- reconstruct canonical URL ---
+    normalized = urlunparse((scheme, netloc, path, "", query, fragment))
+
+    # For most cases, if the query is very long or mostly numeric noise, drop it entirely
+    if len(query) > 80 or any(ch in query for ch in ["=", "_"]):
+        normalized = f"{scheme}://{netloc}{path}"
+
+    return normalized
 
 def _log(msg: str, level: str = "info"):
     st.session_state.logs.append((level, msg))

@@ -154,9 +154,42 @@ KEYWORDS = ["grant", "grants", "apply", "fund", "funding", "eligible", "eligibil
 # ========== SESSION / NAVIGATION ==========
 # ==========================================
 
+def login():
+    st.title("🔐 Login")
+
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+
+    if st.button("Login"):
+        if username in st.secrets["users"] and st.secrets["users"][username] == password:
+            st.session_state["logged_in"] = True
+            st.session_state["username"] = username  # <-- SAVE USERNAME
+            st.rerun()
+        else:
+            st.error("Invalid username or password")
+
+
+if "logged_in" not in st.session_state or not st.session_state["logged_in"]:
+    login()
+    st.stop()
+    
+    
 def init_session():
+    # Load the user's API key once they are logged in
     if "api_key" not in st.session_state:
-        st.session_state.api_key = os.getenv("APIKEY") or os.getenv("OPENAI_API_KEY") or ""
+        if "username" in st.session_state:  
+            user = st.session_state["username"]
+
+            # If the user has a matching API key, store it
+            if user in st.secrets["user_api_keys"]:
+                st.session_state.api_key = st.secrets["user_api_keys"][user]
+            else:
+                st.session_state.api_key = ""  # fallback
+
+        else:
+            # No logged-in user yet
+            st.session_state.api_key = ""
+
     if "logs" not in st.session_state:
         st.session_state.logs = []
     if "last_run_results" not in st.session_state:
@@ -164,7 +197,7 @@ def init_session():
     if "page" not in st.session_state:
         st.session_state.page = "Scrape & Analyze"
     if "unlocked" not in st.session_state:
-        st.session_state.unlocked = False  # “login” (passphrase unlock) state
+        st.session_state.unlocked = False
 
 
 def set_sidebar_nav():
@@ -1105,6 +1138,9 @@ def page_settings():
 def main():
     st.set_page_config(page_title="ellenor Auto Funding Discovery", page_icon="Logo.png", layout="wide")
     init_session()
+    if "logged_in" not in st.session_state or not st.session_state["logged_in"]:
+        login()
+        st.stop()
     set_sidebar_nav()
 
     page = st.session_state.page

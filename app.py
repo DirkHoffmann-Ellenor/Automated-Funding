@@ -12,6 +12,8 @@ from pathlib import Path
 from datetime import datetime
 from base64 import urlsafe_b64encode, urlsafe_b64decode
 from hashlib import sha256
+import gspread
+from google.oauth2.service_account import Credentials
 
 # Try to use proper encryption if available
 try:
@@ -608,17 +610,65 @@ def folder_name_for_url(u: str) -> str:
 # ========== CSV / CACHE LAYER =======
 # ====================================
 
+# Load credentials from Streamlit secrets
+def _get_sheet():
+    creds = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=["https://www.googleapis.com/auth/spreadsheets"]
+    )
+    client = gspread.authorize(creds)
+    sheet_id = st.secrets["google_sheet_id"]
+    sh = client.open_by_key(sheet_id)
+    ws = sh.sheet1
+    return ws
+
+def append_to_google_sheet(rows: List[dict]):
+    """
+    Permanently store results in Google Sheets.
+    Each dict in `rows` is one funding record.
+    """
+    try:
+        ws = _get_sheet()
+
+        # Convert dicts to list-of-lists in column order
+        data = []
+        for r in rows:
+            row = [r.get(col, "") for col in CSV_COLUMNS]
+            data.append(row)
+
+        ws.append_rows(data, value_input_option="RAW")
+    except Exception as e:
+        st.error(f"Failed to write to Google Sheets: {e}")
+
 @st.cache_data(show_spinner=False)
 def load_results_csv(path: str = OUTPUT_CSV) -> pd.DataFrame:
-    if not os.path.exists(path):
-        return pd.DataFrame(columns=CSV_COLUMNS)
+    """
+    Load from Google Sheets (persistent).
+    Local CSV is only fallback.
+    """
     try:
-        df = pd.read_csv(path)
+        ws = _get_sheet()
+        values = ws.get_all_values()
+        if not values:
+            return pd.DataFrame(columns=CSV_COLUMNS)
+
+        header = values[0]
+        rows = values[1:]
+
+        df = pd.DataFrame(rows, columns=header)
+
+        # Make sure all expected columns exist
         for col in CSV_COLUMNS:
             if col not in df.columns:
                 df[col] = ""
+
         return df[CSV_COLUMNS]
-    except Exception:
+
+    except Exception as e:
+        st.error(f"Error loading from Google Sheet: {e}")
+        # fallback
+        if os.path.exists(path):
+            return pd.read_csv(path)
         return pd.DataFrame(columns=CSV_COLUMNS)
 
 @st.cache_data(show_spinner=False)
@@ -1136,6 +1186,7 @@ def page_settings():
 # ===============================
 
 def main():
+    st.write("SECRETS:", list(st.secrets.keys()))
     st.set_page_config(page_title="ellenor Auto Funding Discovery", page_icon="Logo.png", layout="wide")
     init_session()
     if "logged_in" not in st.session_state or not st.session_state["logged_in"]:

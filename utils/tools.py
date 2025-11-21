@@ -334,7 +334,7 @@ def _get_sheet(retries=3, delay=1):
             scopes=["https://www.googleapis.com/auth/spreadsheets"]
         )
         client = gspread.authorize(creds)
-        sheet_id = st.secrets["general"]["google_sheet_id"]
+        sheet_id = st.secrets["google"]["google_sheet_id"]
         sh = client.open_by_key(sheet_id)  # network call
         return sh.sheet1
 

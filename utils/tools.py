@@ -14,9 +14,7 @@ from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ==================================
 # ========== API KEY VAULT =========
-# ==================================
 def get_client() -> Optional[OpenAI]:
     api_key = st.session_state.get("api_key", "").strip()
     if not api_key:
@@ -324,28 +322,7 @@ def call_llm_extract(text: str) -> Dict:
         }
 
 
-# --- Scraped manager helpers ---
-
-def list_scraped_folders(save_dir: str = SAVE_DIR) -> List[str]:
-    if not os.path.exists(save_dir):
-        return []
-    return sorted([d for d in os.listdir(save_dir) if os.path.isdir(os.path.join(save_dir, d))])
-
-def delete_scraped_folder(folder_name: str, save_dir: str = SAVE_DIR) -> bool:
-    try:
-        import shutil
-        path = os.path.join(save_dir, folder_name)
-        if os.path.isdir(path):
-            shutil.rmtree(path)
-            # Clear caches that depend on this listing
-            get_scraped_domains.clear()
-            return True
-    except Exception:
-        pass
-    return False
-
 def folder_name_for_url(u: str) -> str:
-    # consistent with safe_filename_from_url(normalized_url)
     return safe_filename_from_url(normalize_url(u))
 
 
@@ -374,6 +351,17 @@ def _get_sheet(retries=3, delay=1):
             # Exponential backoff
             time.sleep(delay * (2 ** attempt))
 
+def canon_funder_url(url: str) -> str:
+    """Canonical funder URL: base domain only (ignore paths, params, fragments)."""
+    if not url:
+        return ""
+    try:
+        u = normalize_url(url)
+        parts = urlparse(u)
+        domain = parts.netloc.lower().replace("www.", "")
+        return f"https://{domain}"
+    except Exception:
+        return url.strip().lower()
 
 def append_to_google_sheet(rows: List[dict]):
     """

@@ -5,11 +5,11 @@ from typing import List
 
 
 from utils.constants import (
-    SAVE_DIR, CSV_COLUMNS, OUTPUT_CSV, ELIGIBILITY_ORDER
+    SAVE_DIR, CSV_COLUMNS, ELIGIBILITY_ORDER
 )
 
 from utils.tools import (
-    normalize_url, call_llm_extract, load_text_from_folder, folder_name_for_url, list_scraped_folders, delete_scraped_folder, process_single_fund, get_already_processed_urls, get_scraped_domains, load_results_csv, save_results_to_csv, append_to_google_sheet
+    canon_funder_url, normalize_url, process_single_fund, canon_funder_url, load_results_csv, append_to_google_sheet, _get_sheet
         )
 
 # ==========================================
@@ -114,7 +114,7 @@ def page_results():
     st.title("📊 Results")
     st.caption("Browse, filter, and export analyzed funds. Click URLs to open funding pages.")
 
-    df = load_results_csv(OUTPUT_CSV)
+    df = load_results_csv()
     if df.empty:
         st.info("No results yet. Use **Scrape & Analyze** to add funds.")
         return
@@ -189,11 +189,11 @@ def page_results():
             st.caption(f"Status: {row.get('application_status','')} · Deadline: {row.get('deadline','')}")
             st.write(row.get("evidence","") or "_No evidence captured_")
             st.divider()
-
-
+            
+            
 def page_scrape():
     st.title("🌐 Scrape & Analyze")
-    st.caption("Paste URLs or upload a CSV with `fund_url`. We’ll skip items already processed or scraped.")
+    st.caption("Paste URLs or upload a CSV with `fund_url`. We'll skip items already processed or scraped.")
 
     # API key helper
     if not st.session_state.api_key.strip():
@@ -202,9 +202,17 @@ def page_scrape():
             st.write("Go to **Settings → API Key** to enter a key, or unlock from your Local Vault.")
 
     st.subheader("Provide funding URLs")
-    urls_text = st.text_area("One per line", height=120, placeholder="https://funder.org/grants\nhttps://another.org/funding-programme")
-    st.write("**Or** upload a CSV that contains a `fund_url` column.")
-    up = st.file_uploader("Upload CSV", type=["csv"])
+    
+    # Side-by-side inputs
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write("**Enter URLs manually**")
+        urls_text = st.text_area("One per line", height=120, placeholder="https://funder.org/grants\nhttps://another.org/funding-programme", label_visibility="collapsed")
+    
+    with col2:
+        st.write("**Upload CSV with `fund_url` column**")
+        up = st.file_uploader("Upload CSV", type=["csv"], label_visibility="collapsed")
 
     input_urls: List[str] = []
     if urls_text.strip():
@@ -225,109 +233,169 @@ def page_scrape():
     if not input_urls:
         st.info("Add URLs or upload a CSV to proceed.")
         return
-    
 
-    force_rescrape = st.checkbox("Force re-scrape even if a folder exists", value=False, help="Ignores the 'already scraped' skip. Useful when you want a fresh crawl.")
-    purge_before_rescrape = st.checkbox("Purge existing folder before force re-scrape", value=False, help="Deletes the old scraped folder first (safer to avoid mixing old/new pages).")
-
+    # -----------------------------------------------
+    # DUPLICATE CHECK
+    # -----------------------------------------------
     st.subheader("Duplicate check")
-    processed_urls = get_already_processed_urls(OUTPUT_CSV)
-    scraped_domains = get_scraped_domains(SAVE_DIR)
 
-    will_skip, will_process = [], []
+    existing_df = load_results_csv()
+    processed_urls = {canon_funder_url(u): u for u in existing_df["fund_url"].astype(str).tolist()}
+
+    # Categorize URLs
+    duplicates = []
+    unique_new = []
+
     for u in input_urls:
-        domain_key = folder_name_for_url(u).lower()
-        if u in processed_urls and not force_rescrape:
-            will_skip.append((u, "Already in results CSV"))
-        elif (domain_key in scraped_domains) and not force_rescrape:
-            will_skip.append((u, "Already scraped (folder exists)"))
+        norm = canon_funder_url(u)
+        if norm in processed_urls:
+            duplicates.append((u, processed_urls[norm]))
         else:
-            # If forcing, optionally purge the old folder
-            if force_rescrape and (domain_key in scraped_domains) and purge_before_rescrape:
-                if delete_scraped_folder(domain_key, SAVE_DIR):
-                    st.info(f"Purged existing scraped folder for {u}")
-                else:
-                    st.warning(f"Could not purge scraped folder for {u}; continuing anyway.")
-            will_process.append(u)
+            unique_new.append(u)
 
+    # Side-by-side display for duplicates and new URLs
+    col_dup, col_new = st.columns(2)
+    
+    urls_to_reprocess = []
+    
+    with col_dup:
+        if duplicates:
+            st.warning(f"⚠️ {len(duplicates)} Duplicate(s)")
+            with st.expander("Select URLs to re-process", expanded=True):
+                st.caption("Check URLs to re-scrape (existing data will be deleted)")
+                for idx, (new_u, old_u) in enumerate(duplicates):
+                    display_url = new_u if new_u == old_u else f"{new_u} (exists as: {old_u})"
+                    if st.checkbox(display_url, key=f"dup_{idx}"):
+                        urls_to_reprocess.append(new_u)
+                
+                if urls_to_reprocess:
+                    st.info(f"📝 {len(urls_to_reprocess)} selected for re-processing")
+        else:
+            st.success("✅ No duplicates found")
+    
+    with col_new:
+        if unique_new:
+            st.success(f"✨ {len(unique_new)} New URL(s)")
+            with st.expander("Show new URLs", expanded=True):
+                for u in unique_new:
+                    st.write(f"- {u}")
+        else:
+            st.info("No new URLs to process")
 
-    if will_skip:
-        with st.expander("Skipped (to save time & cost)", expanded=True):
-            for u, reason in will_skip:
-                st.write(f"⏭️  {u} — {reason}")
+    # Build final processing list
+    will_process = list(unique_new) + urls_to_reprocess
 
-    if will_process:
-        st.success(f"{len(will_process)} URL(s) ready to process.")
-        with st.expander("Show list to be processed"):
-            for u in will_process:
-                st.write(f"- {u}")
+    if not will_process:
+        st.info("Nothing to process. Add new URLs or select URLs to re-process.")
+        return
 
-    go = st.button("🚀 Start", type="primary", use_container_width=True, disabled=len(will_process)==0)
+    # Show summary
+    st.success(f"🎯 Total: {len(will_process)} URL(s) ready to process")
+
+    # Delete selected duplicates from Google Sheets
+    if urls_to_reprocess:
+        try:
+            ws = _get_sheet()
+            values = ws.get_all_values()
+            fund_url_idx = values[0].index("fund_url")
+
+            # Normalize URLs to delete
+            norms_to_delete = {canon_funder_url(u) for u in urls_to_reprocess}
+
+            # Delete matching rows (iterate bottom-up)
+            delete_count = 0
+            for r in range(len(values) - 1, 0, -1):
+                row_url = canon_funder_url(values[r][fund_url_idx])
+                if row_url in norms_to_delete:
+                    ws.delete_rows(r + 1)
+                    delete_count += 1
+
+            if delete_count:
+                st.success(f"🗑️ Deleted {delete_count} existing row(s) from Google Sheets")
+        except Exception as e:
+            st.error(f"Error deleting rows: {e}")
+
+    # Continue button
+    go = st.button("🚀 Start Processing", type="primary", use_container_width=True)
     if not go:
         return
 
     # Clear logs and prep trackers
     st.session_state.logs = []
     progress = st.progress(0)
-    status = st.empty()
     results: List[dict] = []
     errs = []
 
     os.makedirs(SAVE_DIR, exist_ok=True)
 
-    for i, url in enumerate(will_process, start=1):
-        status.info(f"Processing {i}/{len(will_process)} — {url}")
-        try:
-            with st.spinner(f"Crawling and analyzing: {url}"):
-                res = process_single_fund(url)
-                results.append(res)
-                if res.get("error"):
-                    errs.append((url, res["error"]))
+    # Container for processing status
+    st.subheader("Processing Status")
+    processing_container = st.container()
 
-                # Per-fund preview
-                with st.expander(f"Result: {res.get('fund_name') or url}", expanded=False):
+    # Track completion status for each URL
+    url_status = {url: {"done": False, "result": None, "error": None} for url in will_process}
+
+    for i, url in enumerate(will_process, start=1):
+        # Create expander for this URL
+        with processing_container:
+            with st.expander(f"{'🔄' if not url_status[url]['done'] else '✅'} {url}", expanded=False):
+                log_placeholder = st.empty()
+                log_placeholder.info(f"Processing... ({i}/{len(will_process)})")
+                
+                try:
+                    res = process_single_fund(url)
+                    results.append(res)
+                    url_status[url]["done"] = True
+                    url_status[url]["result"] = res
+                    
                     if res.get("error"):
-                        st.error(res["error"])
+                        errs.append((url, res["error"]))
+                        url_status[url]["error"] = res["error"]
+                        log_placeholder.error(f"✅ Completed with error: {res['error']}")
                     else:
+                        log_placeholder.success("✅ Successfully processed")
+                        
+                        # Show result details
                         c1, c2, c3 = st.columns([2,1,1])
                         with c1:
+                            st.markdown(f"**Fund Name:** {res.get('fund_name', 'N/A')}")
                             st.markdown(f"**URL:** [{res.get('fund_url','')}]({res.get('fund_url','')})")
-                            st.markdown(f"**Funding range:** {res.get('funding_range','')}")
-                            st.markdown(f"**Scope:** {res.get('geographic_scope','')}")
+                            st.markdown(f"**Funding range:** {res.get('funding_range','N/A')}")
+                            st.markdown(f"**Scope:** {res.get('geographic_scope','N/A')}")
                         with c2:
                             st.metric("Pages scraped", int(res.get("pages_scraped") or 0))
                             st.metric("Links visited", int(res.get("visited_urls_count") or 0))
                         with c3:
                             color = _eligibility_color(res.get("eligibility",""))
                             st.markdown("**Eligibility**")
-                            st.markdown(f"<span style='color:{color};font-weight:700'>{res.get('eligibility','')}</span>", unsafe_allow_html=True)
+                            st.markdown(f"<span style='color:{color};font-weight:700'>{res.get('eligibility','N/A')}</span>", unsafe_allow_html=True)
 
-                        with st.expander("Evidence", expanded=False):
+                        with st.expander("📋 Evidence", expanded=False):
                             st.write(res.get("evidence", "") or "_No evidence recorded_")
-                        with st.expander("Notes / Restrictions / Applicant types", expanded=False):
-                            st.write(f"**Notes:** {res.get('notes','')}")
-                            st.write(f"**Restrictions:** {res.get('restrictions','')}")
-                            st.write(f"**Applicant types:** {res.get('applicant_types','')}")
+                        with st.expander("📝 Details", expanded=False):
+                            st.write(f"**Notes:** {res.get('notes','N/A')}")
+                            st.write(f"**Restrictions:** {res.get('restrictions','N/A')}")
+                            st.write(f"**Applicant types:** {res.get('applicant_types','N/A')}")
+                            st.write(f"**Beneficiary focus:** {res.get('beneficiary_focus','N/A')}")
 
-                # Append to master CSV as we go
-                try:
-                    save_results_to_csv([res], OUTPUT_CSV)
-                    append_to_google_sheet([res])   # <-- ADD THIS LINE
+                    # Append to master CSV as we go
+                    try:
+                        append_to_google_sheet([res])
+                    except Exception as e:
+                        st.error(f"Could not save results: {e}")
+
                 except Exception as e:
-                    st.error(f"Could not save results: {e}")
-
-
-        except Exception as e:
-            errs.append((url, str(e)))
-            st.error(f"Unexpected error on {url}: {e}")
+                    errs.append((url, str(e)))
+                    url_status[url]["done"] = True
+                    url_status[url]["error"] = str(e)
+                    log_placeholder.error(f"❌ Error: {str(e)}")
 
         progress.progress(int(i/len(will_process)*100))
 
-    status.success("Done.")
+    st.success("✅ All URLs processed")
 
-    # Error summary (cleaner, grouped)
     if errs:
-        st.subheader("Issues encountered")
+        st.subheader("⚠️ Issues encountered")
         grouped = {}
         for u, e in errs:
             key = "Network" if any(k in e for k in ["Name or service", "Failed to establish", "timeout"]) else \
@@ -340,7 +408,7 @@ def page_scrape():
                     st.write(f"• **{u}** — {e}")
 
     # Batch table
-    st.subheader("This batch")
+    st.subheader("📊 This batch summary")
     df_new = pd.DataFrame(results)
     if not df_new.empty:
         for col in CSV_COLUMNS:
@@ -384,48 +452,6 @@ def page_scrape():
     st.markdown("---")
     st.subheader("🔁 Reprocess from scraped text (LLM only)")
     st.caption("Reads text files already in `Scraped/` and re-runs the LLM extractor without re-crawling.")
-
-    folders = list_scraped_folders(SAVE_DIR)
-    if not folders:
-        st.info("No scraped folders found yet.")
-    else:
-        pick = st.selectbox("Choose a scraped folder", folders, index=0)
-        r1, r2 = st.columns([1,1])
-        with r1:
-            reprocess_now = st.button("Run LLM Extraction on Selected Folder", use_container_width=True)
-        with r2:
-            del_now = st.button("Delete Selected Folder", type="secondary", use_container_width=True)
-
-        if reprocess_now:
-            if not st.session_state.api_key.strip():
-                st.error("Please set your OpenAI API key first (Settings).")
-            else:
-                full_path = os.path.join(SAVE_DIR, pick)
-                combined_text, file_count, url_guess = load_text_from_folder(full_path)
-                if not combined_text or len(combined_text) < 100:
-                    st.warning(f"Insufficient text in {pick} ({len(combined_text)} chars).")
-                else:
-                    data = call_llm_extract(combined_text)
-                    row = {
-                        "fund_url": url_guess or "",
-                        "fund_name": pick,
-                        "extraction_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "pages_scraped": file_count,
-                        "visited_urls_count": file_count,
-                        "error": ""
-                    }
-                    row.update(data)
-                    save_results_to_csv([row], OUTPUT_CSV)
-                    st.success(f"Saved reprocessed result to {OUTPUT_CSV}")
-                    st.json({k: row.get(k) for k in ["fund_url","eligibility","application_status","deadline","funding_range","notes"]})
-
-        if del_now:
-            if delete_scraped_folder(pick, SAVE_DIR):
-                st.success(f"Deleted folder: {pick}")
-            else:
-                st.error("Could not delete folder. Check permissions.")
-
-
 
 def page_settings():
     st.title("⚙️ Settings")

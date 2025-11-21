@@ -21,8 +21,6 @@ def login():
 
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
-    username = "DirkHoffmann"
-    password = "H0ffmann123"
 
     if st.button("Login"):
         if username in st.secrets["users"] and st.secrets["users"][username] == password:
@@ -84,8 +82,6 @@ def set_sidebar_nav():
         st.markdown("---")
         key_status = "Loaded" if st.session_state.api_key.strip() else "Not set"
         st.metric("API key", key_status)
-
-        st.write("Secrets loaded:", st.secrets)
 
 # ===============================
 # ========== UI PAGES ===========

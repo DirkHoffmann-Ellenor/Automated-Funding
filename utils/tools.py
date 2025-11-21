@@ -351,6 +351,13 @@ def _get_sheet(retries=3, delay=1):
             # Exponential backoff
             time.sleep(delay * (2 ** attempt))
 
+def load_google_sheet_as_dataframe():
+    """Always loads the Google Sheet fresh, no caching."""
+    ws = _get_sheet()                      # LIVE connection
+    data = ws.get_all_records()            # ALWAYS fresh
+    return pd.DataFrame(data)
+
+
 def canon_funder_url(url: str) -> str:
     """Canonical funder URL: base domain only (ignore paths, params, fragments)."""
     if not url:

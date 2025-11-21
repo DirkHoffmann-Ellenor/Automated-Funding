@@ -65,7 +65,8 @@ def init_session():
 
 def set_sidebar_nav():
     with st.sidebar:
-        
+        st.write("Secrets loaded:", st.secrets)
+
         st.title("ellenor Funding")
         st.caption("Scrape → Analyze → Review results")
 

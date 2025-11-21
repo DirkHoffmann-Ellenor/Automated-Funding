@@ -9,7 +9,7 @@ from utils.constants import (
 )
 
 from utils.tools import (
-    canon_funder_url, normalize_url, process_single_fund, canon_funder_url, load_results_csv, append_to_google_sheet, _get_sheet
+    canon_funder_url, load_google_sheet_as_dataframe, normalize_url, process_single_fund, canon_funder_url, load_results_csv, append_to_google_sheet, _get_sheet
         )
 
 # ==========================================
@@ -71,9 +71,11 @@ def set_sidebar_nav():
 
         if st.button("🌐 Scrape & Analyze", key="nav_scrape", use_container_width=True):
             st.session_state.page = "Scrape & Analyze"
-
+                    
         if st.button("📊 Results", key="nav_results", use_container_width=True):
             st.session_state.page = "Results"
+            st.session_state.force_reload = True
+
             
         if st.button("⚙️ Settings", key="nav_settings", use_container_width=True):
             st.session_state.page = "Settings"
@@ -113,10 +115,11 @@ def _results_metrics(df: pd.DataFrame):
         [col2, col3, col4, col5][idx].metric(label, count)
 
 def page_results():
+    
     st.title("📊 Results")
     st.caption("Browse, filter, and export analyzed funds. Click URLs to open funding pages.")
 
-    df = load_results_csv()
+    df = load_google_sheet_as_dataframe()
     if df.empty:
         st.info("No results yet. Use **Scrape & Analyze** to add funds.")
         return
@@ -241,7 +244,7 @@ def page_scrape():
     # -----------------------------------------------
     st.subheader("Duplicate check")
 
-    existing_df = load_results_csv()
+    existing_df = load_google_sheet_as_dataframe()
     processed_urls = {canon_funder_url(u): u for u in existing_df["fund_url"].astype(str).tolist()}
 
     # Categorize URLs

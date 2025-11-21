@@ -78,12 +78,12 @@ def set_sidebar_nav():
         if st.button("⚙️ Settings", key="nav_settings", use_container_width=True):
             st.session_state.page = "Settings"
             
-        st.write("Secrets loaded:", st.secrets)
 
         st.markdown("---")
         key_status = "Loaded" if st.session_state.api_key.strip() else "Not set"
         st.metric("API key", key_status)
 
+        st.write("Secrets loaded:", st.secrets)
 
 # ===============================
 # ========== UI PAGES ===========

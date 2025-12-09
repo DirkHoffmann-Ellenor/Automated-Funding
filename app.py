@@ -9,7 +9,7 @@ from utils.constants import (
 )
 
 from utils.tools import (
-    canon_funder_url, load_google_sheet_as_dataframe, normalize_url, process_single_fund, canon_funder_url, load_results_csv, append_to_google_sheet, _get_sheet
+    canon_funder_url, load_google_sheet_as_dataframe, normalize_url, process_single_fund, canon_funder_url, load_results_csv, append_to_google_sheet, _get_sheet, start_background_scrape
         )
 
 # ==========================================
@@ -334,86 +334,120 @@ def page_scrape():
                 st.success(f"🗑️ Deleted {delete_count} existing row(s) from Google Sheets")
         except Exception as e:
             st.error(f"Error deleting rows: {e}")
-
-
-    # Continue button
+            
+            
+        
+    # ----------------------------
+    # CONTINUE BUTTON
+    # ----------------------------
     go = st.button("🚀 Start Processing", type="primary", use_container_width=True)
     if not go:
         return
 
-    # Clear logs and prep trackers
-    st.session_state.logs = []
-    progress = st.progress(0)
-    results: List[dict] = []
-    errs = []
+    # -----------------------------------------
+    # INITIALISE SCRAPE STATE
+    # -----------------------------------------
+    st.session_state.scrape_started = True
+    st.session_state.scrape_done = False
+    st.session_state.scrape_progress = 0
+    st.session_state.scrape_results = []
+    st.session_state.scrape_errors = []
+    st.session_state.scrape_list = will_process  # keep list for UI
 
-    os.makedirs(SAVE_DIR, exist_ok=True)
+    # Kick off background scraping thread
+    start_background_scrape(will_process)
 
-    # Container for processing status
-    st.subheader("Processing Status")
-    processing_container = st.container()
+    # Immediately refresh UI to begin showing progress
+    st.rerun()
 
-    # Track completion status for each URL
-    url_status = {url: {"done": False, "result": None, "error": None} for url in will_process}
 
-    for i, url in enumerate(will_process, start=1):
-        # Create expander for this URL
-        with processing_container:
-            with st.expander(f"{'🔄' if not url_status[url]['done'] else '✅'} {url}", expanded=False):
-                log_placeholder = st.empty()
-                log_placeholder.info(f"Processing... ({i}/{len(will_process)})")
-                
-                try:
-                    res = process_single_fund(url)
-                    results.append(res)
-                    url_status[url]["done"] = True
-                    url_status[url]["result"] = res
-                    
-                    if res.get("error"):
-                        errs.append((url, res["error"]))
-                        url_status[url]["error"] = res["error"]
-                        log_placeholder.error(f"✅ Completed with error: {res['error']}")
-                    else:
-                        log_placeholder.success("✅ Successfully processed")
-                        
-                        # Show result details
-                        c1, c2, c3 = st.columns([2,1,1])
-                        with c1:
-                            st.markdown(f"**Fund Name:** {res.get('fund_name', 'N/A')}")
-                            st.markdown(f"**URL:** [{res.get('fund_url','')}]({res.get('fund_url','')})")
-                            st.markdown(f"**Funding range:** {res.get('funding_range','N/A')}")
-                            st.markdown(f"**Scope:** {res.get('geographic_scope','N/A')}")
-                        with c2:
-                            st.metric("Pages scraped", int(res.get("pages_scraped") or 0))
-                            st.metric("Links visited", int(res.get("visited_urls_count") or 0))
-                        with c3:
-                            color = _eligibility_color(res.get("eligibility",""))
-                            st.markdown("**Eligibility**")
-                            st.markdown(f"<span style='color:{color};font-weight:700'>{res.get('eligibility','N/A')}</span>", unsafe_allow_html=True)
+    # ===================================================================
+    # ======================== LIVE SCRAPING UI ==========================
+    # ===================================================================
+    if st.session_state.get("scrape_started", False):
 
-                        with st.expander("📋 Evidence", expanded=False):
-                            st.write(res.get("evidence", "") or "_No evidence recorded_")
-                        with st.expander("📝 Details", expanded=False):
-                            st.write(f"**Notes:** {res.get('notes','N/A')}")
-                            st.write(f"**Restrictions:** {res.get('restrictions','N/A')}")
-                            st.write(f"**Applicant types:** {res.get('applicant_types','N/A')}")
-                            st.write(f"**Beneficiary focus:** {res.get('beneficiary_focus','N/A')}")
+        st.subheader("Processing Status")
 
-                    # Append to master CSV as we go
-                    try:
-                        append_to_google_sheet([res])
-                    except Exception as e:
-                        st.error(f"Could not save results: {e}")
+        # Progress bar
+        progress = st.progress(st.session_state.scrape_progress)
 
-                except Exception as e:
-                    errs.append((url, str(e)))
-                    url_status[url]["done"] = True
-                    url_status[url]["error"] = str(e)
-                    log_placeholder.error(f"❌ Error: {str(e)}")
+        # -------------------------------------------
+        # Show each result as it becomes available
+        # -------------------------------------------
+        if st.session_state.scrape_results:
+            with st.expander("Processed Items", expanded=True):
+                for res in st.session_state.scrape_results:
+                    color = _eligibility_color(res.get("eligibility", ""))
 
-        progress.progress(int(i/len(will_process)*100))
+                    st.markdown(
+                        f"**{res.get('fund_name','N/A')}** — "
+                        f"[{res.get('fund_url','')}]({res.get('fund_url','')})<br>"
+                        f"<span style='color:{color};font-weight:700'>{res.get('eligibility','N/A')}</span>",
+                        unsafe_allow_html=True
+                    )
 
-    st.success("✅ All URLs processed")
+                    st.caption(
+                        f"Pages: {res.get('pages_scraped',0)} • "
+                        f"Links: {res.get('visited_urls_count',0)}"
+                    )
+
+                    with st.expander("📋 Evidence", expanded=False):
+                        st.write(res.get("evidence", "") or "_No evidence recorded_")
+
+                    st.divider()
+
+        # -------------------------------------------
+        # Display errors as scraping progresses
+        # -------------------------------------------
+        if st.session_state.scrape_errors:
+            with st.expander("⚠️ Errors", expanded=False):
+                for u, e in st.session_state.scrape_errors:
+                    st.write(f"• **{u}** — {e}")
+
+        # -------------------------------------------
+        # When scraping is fully complete
+        # -------------------------------------------
+        if st.session_state.scrape_done:
+            st.success("🎉 All URLs processed successfully!")
+
+            # Convert results to DataFrame
+            df_new = pd.DataFrame(st.session_state.scrape_results)
+
+            if not df_new.empty:
+                # Ensure all expected columns exist
+                for col in CSV_COLUMNS:
+                    if col not in df_new.columns:
+                        df_new[col] = ""
+
+                ordered_cols = [
+                    "fund_url", "eligibility", "fund_name", "application_status", "deadline",
+                    "funding_range", "geographic_scope", "applicant_types", "beneficiary_focus",
+                    "restrictions", "notes", "evidence",
+                    "pages_scraped", "visited_urls_count", "extraction_timestamp", "error"
+                ]
+
+                df_new = df_new[[c for c in ordered_cols if c in df_new.columns]]
+
+                st.subheader("📊 Batch Summary")
+                st.dataframe(df_new, use_container_width=True, height=420)
+
+                st.download_button(
+                    "Download This Batch (CSV)",
+                    data=df_new.to_csv(index=False).encode("utf-8"),
+                    file_name="funds_results_batch.csv",
+                    mime="text/csv"
+                )
+
+            st.stop()
+
+        # -------------------------------------------
+        # Scrape not done → refresh page
+        # -------------------------------------------
+        st.info("⏳ Scraping in progress… This page will refresh automatically.")
+        time.sleep(1)
+        st.rerun()
+
+
 
     if errs:
         st.subheader("⚠️ Issues encountered")

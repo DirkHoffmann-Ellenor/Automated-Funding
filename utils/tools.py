@@ -13,6 +13,8 @@ from pathlib import Path
 from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
+import threading
+import time
 
 # ========== API KEY VAULT =========
 def get_client() -> Optional[OpenAI]:
@@ -515,3 +517,52 @@ def process_single_fund(url: str, fund_name: Optional[str] = None) -> dict:
         result["error"] = msg
     return result
 
+
+# -----------------------------
+# BACKGROUND SCRAPE WORKER
+# -----------------------------
+def start_background_scrape(urls):
+    """
+    Starts processing funds in a background thread.
+    Saves logs + results into st.session_state continuously.
+    """
+
+    def worker():
+        st.session_state.scrape_done = False
+        st.session_state.scrape_progress = 0
+        st.session_state.scrape_errors = []
+        st.session_state.scrape_results = []
+
+        total = len(urls)
+
+        for i, url in enumerate(urls, start=1):
+            try:
+                res = process_single_fund(url)
+
+                st.session_state.scrape_results.append(res)
+
+                if res.get("error"):
+                    st.session_state.scrape_errors.append((url, res["error"]))
+                else:
+                    pass
+
+            except Exception as e:
+                st.session_state.scrape_errors.append((url, str(e)))
+
+            # update progress % safely
+            st.session_state.scrape_progress = int(i / total * 100)
+
+            # protect UI from being flooded
+            time.sleep(0.1)
+
+        # WAIT — batch save results to sheet at the very end
+        try:
+            if st.session_state.scrape_results:
+                append_to_google_sheet(st.session_state.scrape_results)
+        except Exception as e:
+            st.session_state.scrape_errors.append(("SAVE_TO_SHEET", str(e)))
+
+        st.session_state.scrape_done = True
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()

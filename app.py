@@ -234,7 +234,7 @@ def page_scrape():
     if not input_urls:
         st.info("Add URLs or upload a CSV to proceed.")
         return
-
+    
     # -----------------------------------------------
     # DUPLICATE CHECK
     # -----------------------------------------------
@@ -254,11 +254,15 @@ def page_scrape():
         else:
             unique_new.append(u)
 
-    # Side-by-side display for duplicates and new URLs
+    # Side-by-side display
     col_dup, col_new = st.columns(2)
-    
+
     urls_to_reprocess = []
-    
+    selected_new_urls = []   # NEW LIST
+
+    # ----------------------------
+    # DUPLICATES SECTION
+    # ----------------------------
     with col_dup:
         if duplicates:
             st.warning(f"⚠️ {len(duplicates)} Duplicate(s)")
@@ -268,42 +272,57 @@ def page_scrape():
                     display_url = new_u if new_u == old_u else f"{new_u} (exists as: {old_u})"
                     if st.checkbox(display_url, key=f"dup_{idx}"):
                         urls_to_reprocess.append(new_u)
-                
+
                 if urls_to_reprocess:
                     st.info(f"📝 {len(urls_to_reprocess)} selected for re-processing")
         else:
             st.success("✅ No duplicates found")
-    
+
+
+    # ----------------------------
+    # NEW URL SECTION
+    # ----------------------------
     with col_new:
         if unique_new:
             st.success(f"✨ {len(unique_new)} New URL(s)")
-            with st.expander("Show new URLs", expanded=True):
-                for u in unique_new:
-                    st.write(f"- {u}")
+            with st.expander("Select new URLs to process", expanded=True):
+                st.caption("Uncheck any URLs you do NOT want to scrape")
+                for idx, u in enumerate(unique_new):
+                    if st.checkbox(u, key=f"new_{idx}", value=True):  # default checked
+                        selected_new_urls.append(u)
+
+            if selected_new_urls:
+                st.info(f"🆕 {len(selected_new_urls)} new URL(s) selected")
+            else:
+                st.warning("⚠️ No new URLs selected")
         else:
             st.info("No new URLs to process")
 
-    # Build final processing list
-    will_process = list(unique_new) + urls_to_reprocess
+
+    # ----------------------------
+    # BUILD FINAL LIST
+    # ----------------------------
+    will_process = selected_new_urls + urls_to_reprocess
 
     if not will_process:
         st.info("Nothing to process. Add new URLs or select URLs to re-process.")
         return
 
-    # Show summary
+    # Summary
     st.success(f"🎯 Total: {len(will_process)} URL(s) ready to process")
 
-    # Delete selected duplicates from Google Sheets
+
+    # ----------------------------
+    # DELETE SELECTED DUPLICATES
+    # ----------------------------
     if urls_to_reprocess:
         try:
             ws = _get_sheet()
             values = ws.get_all_values()
             fund_url_idx = values[0].index("fund_url")
 
-            # Normalize URLs to delete
             norms_to_delete = {canon_funder_url(u) for u in urls_to_reprocess}
 
-            # Delete matching rows (iterate bottom-up)
             delete_count = 0
             for r in range(len(values) - 1, 0, -1):
                 row_url = canon_funder_url(values[r][fund_url_idx])
@@ -315,6 +334,7 @@ def page_scrape():
                 st.success(f"🗑️ Deleted {delete_count} existing row(s) from Google Sheets")
         except Exception as e:
             st.error(f"Error deleting rows: {e}")
+
 
     # Continue button
     go = st.button("🚀 Start Processing", type="primary", use_container_width=True)

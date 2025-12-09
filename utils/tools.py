@@ -359,18 +359,35 @@ def load_google_sheet_as_dataframe():
     data = ws.get_all_records()            # ALWAYS fresh
     return pd.DataFrame(data)
 
-
 def canon_funder_url(url: str) -> str:
-    """Canonical funder URL: base domain only (ignore paths, params, fragments)."""
+    """
+    Canonical funder URL.
+
+    Special rule:
+    - For Charity Commission register URLs:
+      Must match EXACT FULL URL (after basic normalization).
+    - Otherwise:
+      Canonicalize to base domain only.
+    """
     if not url:
         return ""
+
     try:
         u = normalize_url(url)
         parts = urlparse(u)
         domain = parts.netloc.lower().replace("www.", "")
+
+        # SPECIAL CASE: Charity Commission Register
+        if domain.startswith("register-of-charities.charitycommission"):
+            # exact match, no simplification
+            return u.rstrip("/")
+
+        # DEFAULT: return only the domain
         return f"https://{domain}"
+
     except Exception:
         return url.strip().lower()
+
 
 def append_to_google_sheet(rows: List[dict]):
     """
@@ -522,47 +539,31 @@ def process_single_fund(url: str, fund_name: Optional[str] = None) -> dict:
 # BACKGROUND SCRAPE WORKER
 # -----------------------------
 def start_background_scrape(urls):
-    """
-    Starts processing funds in a background thread.
-    Saves logs + results into st.session_state continuously.
-    """
-
     def worker():
         st.session_state.scrape_done = False
         st.session_state.scrape_progress = 0
-        st.session_state.scrape_errors = []
         st.session_state.scrape_results = []
+        st.session_state.scrape_errors = []
 
         total = len(urls)
 
         for i, url in enumerate(urls, start=1):
             try:
+                # MUST stay clean: no Streamlit calls inside
                 res = process_single_fund(url)
-
                 st.session_state.scrape_results.append(res)
 
                 if res.get("error"):
                     st.session_state.scrape_errors.append((url, res["error"]))
-                else:
-                    pass
 
             except Exception as e:
                 st.session_state.scrape_errors.append((url, str(e)))
 
-            # update progress % safely
+            # Pure Python update (SAFE)
             st.session_state.scrape_progress = int(i / total * 100)
 
-            # protect UI from being flooded
-            time.sleep(0.1)
-
-        # WAIT — batch save results to sheet at the very end
-        try:
-            if st.session_state.scrape_results:
-                append_to_google_sheet(st.session_state.scrape_results)
-        except Exception as e:
-            st.session_state.scrape_errors.append(("SAVE_TO_SHEET", str(e)))
-
+        # IMPORTANT: DO NOT write to Google Sheets here!
+        # That requires a ScriptRunContext.
         st.session_state.scrape_done = True
 
-    t = threading.Thread(target=worker, daemon=True)
-    t.start()
+    threading.Thread(target=worker, daemon=True).start()

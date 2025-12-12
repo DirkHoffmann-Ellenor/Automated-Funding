@@ -1,0 +1,46 @@
+"""In-memory tracking for background scrape jobs."""
+from __future__ import annotations
+
+import threading
+import uuid
+from dataclasses import dataclass, field
+from typing import Dict, List
+
+from utils.tools import ScrapeProgress, start_background_scrape
+
+
+@dataclass
+class Job:
+    id: str
+    urls: List[str]
+    progress: ScrapeProgress
+
+    def snapshot(self) -> Dict:
+        return {
+            "job_id": self.id,
+            "done": self.progress.done,
+            "progress_percent": self.progress.progress_percent,
+            "results": self.progress.results,
+            "errors": self.progress.errors,
+        }
+
+
+class JobStore:
+    def __init__(self) -> None:
+        self._jobs: Dict[str, Job] = {}
+        self._lock = threading.Lock()
+
+    def create(self, urls: List[str]) -> Job:
+        job_id = uuid.uuid4().hex
+        progress = start_background_scrape(urls)
+        job = Job(id=job_id, urls=urls, progress=progress)
+        with self._lock:
+            self._jobs[job_id] = job
+        return job
+
+    def get(self, job_id: str) -> Job | None:
+        with self._lock:
+            return self._jobs.get(job_id)
+
+
+job_store = JobStore()

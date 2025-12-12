@@ -238,3 +238,5 @@ out/
 
 # OS / binaries
 *.node
+
+*.DS_Store

@@ -5,6 +5,39 @@
 Detailed Funder Information - Grants Made*
 venv
 
+# System / editor noise
+Thumbs.db
+Desktop.ini
+~$*
+*.tmp
+*.bak
+*.swp
+*.swo
+.vscode/
+.idea/
+*.code-workspace
+
+# Python versions
+.python-version
+
+# Coverage artifacts
+coverage/
+
+# Build / cache artifacts
+pip-wheel-metadata/
+*.tsbuildinfo
+.eslintcache
+
+# Streamlit local state
+.streamlit/
+
+# Hosting / build outputs
+.vercel/
+.turbo/
+
+# Scraping run outputs
+Scraping of Websites/**/debug_html/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -221,5 +254,24 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+# Node / Frontend
+node_modules/
+frontend/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+
+# Next.js
+.next/
+out/
+
+# OS / binaries
+*.node
+
+*.DS_Store
 
 Scraping of Websites/GrantNav/debug_html/*.txt

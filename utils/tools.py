@@ -1,23 +1,82 @@
-from Web_scraper_2 import OUTPUT_CSV
-from utils.constants import SAVE_DIR, DISCOVERY_DEPTH, MAX_PAGES, MAX_DISCOVERY_PAGES, PAUSE_BETWEEN_REQUESTS, HEADERS, CSV_COLUMNS, KEYWORDS, LLM_PROMPT, ELIGIBILITY_ORDER
-
-import os, re, time, json, requests, pandas as pd
-import streamlit as st
-from bs4 import BeautifulSoup
-from urllib.parse import urlparse, urljoin
-from openai import OpenAI
-from typing import Dict, List, Tuple, Set, Optional
-from pathlib import Path
-from datetime import datetime
-import gspread
-from google.oauth2.service_account import Credentials
+import json
+import logging
+import os
+import re
 import threading
 import time
+from dataclasses import dataclass, field
+from datetime import datetime
+from functools import lru_cache
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Set, Tuple
+from urllib.parse import urljoin, urlparse
+
+import gspread
+import pandas as pd
+import requests
+from bs4 import BeautifulSoup
+from google.oauth2.service_account import Credentials
+from openai import OpenAI
+
+from Web_scraper_2 import OUTPUT_CSV
+from utils.constants import (
+    CSV_COLUMNS,
+    DISCOVERY_DEPTH,
+    ELIGIBILITY_ORDER,
+    HEADERS,
+    KEYWORDS,
+    LLM_PROMPT,
+    MAX_DISCOVERY_PAGES,
+    MAX_PAGES,
+    PAUSE_BETWEEN_REQUESTS,
+    SAVE_DIR,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ToolSettings:
+    openai_api_key: Optional[str] = None
+    google_service_account: Optional[dict] = None
+    google_sheet_id: Optional[str] = None
+    log_callback: Optional[Callable[[str, str], None]] = None
+
+
+@dataclass
+class ScrapeProgress:
+    done: bool = False
+    progress_percent: int = 0
+    results: List[dict] = field(default_factory=list)
+    errors: List[Tuple[str, str]] = field(default_factory=list)
+
+
+_SETTINGS = ToolSettings()
+
+
+def configure_tools(
+    *,
+    openai_api_key: Optional[str] = None,
+    google_service_account: Optional[dict] = None,
+    google_sheet_id: Optional[str] = None,
+    log_callback: Optional[Callable[[str, str], None]] = None,
+):
+    """Update runtime settings used by the scraping utilities."""
+
+    if openai_api_key is not None:
+        _SETTINGS.openai_api_key = openai_api_key
+    if google_service_account is not None:
+        _SETTINGS.google_service_account = google_service_account
+    if google_sheet_id is not None:
+        _SETTINGS.google_sheet_id = google_sheet_id
+    if log_callback is not None:
+        _SETTINGS.log_callback = log_callback
 
 
 # ========== API KEY VAULT =========
 def get_client() -> Optional[OpenAI]:
-    api_key = st.session_state.get("api_key", "").strip()
+    api_key = (_SETTINGS.openai_api_key or "").strip()
     if not api_key:
         return None
     try:
@@ -78,16 +137,22 @@ def initial_normalize_url(url: str) -> str:
     return normalized
 
 
-def _log(msg: str, level: str = "info"):
-    st.session_state.logs.append((level, msg))
-    if level == "error":
-        st.error(msg)
-    elif level == "warning":
-        st.warning(msg)
-    elif level == "success":
-        st.success(msg)
+def _log(message: str, level: str = "info") -> None:
+    """Write to the configured callback and fall back to logging."""
+
+    callback = _SETTINGS.log_callback
+    if callback:
+        try:
+            callback(level, message)
+            return
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Log callback failed")
+
+    log_fn = getattr(logger, level, None)
+    if callable(log_fn):
+        log_fn(message)
     else:
-        st.write(msg)
+        logger.info("%s", message)
 
 
 def fetch_page(url: str, retries: int = 4, backoff_factor: int = 2) -> Optional[str]:
@@ -330,34 +395,48 @@ def folder_name_for_url(u: str) -> str:
     return safe_filename_from_url(normalize_url(u))
 
 
-def _get_sheet(retries=3, delay=1):
+def _require_google_config() -> Tuple[dict, str]:
+    if not _SETTINGS.google_service_account or not _SETTINGS.google_sheet_id:
+        raise RuntimeError("Google Sheets credentials not configured. Call configure_tools(...) first.")
+    return _SETTINGS.google_service_account, _SETTINGS.google_sheet_id
+
+
+def _get_sheet(retries: int = 3, delay: int = 1):
+    creds_info, sheet_id = _require_google_config()
 
     def try_connect():
-        creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=["https://www.googleapis.com/auth/spreadsheets"])
+        creds = Credentials.from_service_account_info(
+            creds_info,
+            scopes=["https://www.googleapis.com/auth/spreadsheets"],
+        )
         client = gspread.authorize(creds)
-        sheet_id = st.secrets["google"]["google_sheet_id"]
-        sh = client.open_by_key(sheet_id)  # network call
+        sh = client.open_by_key(sheet_id)
         return sh.sheet1
 
     for attempt in range(retries):
         try:
             return try_connect()
-
-        except requests.exceptions.RequestException as e:
-            # DNS / connectivity errors end up here
+        except requests.exceptions.RequestException as exc:
             if attempt == retries - 1:
-                st.error("Network error while contacting Google. Please try again.")
-                raise e
-
-            # Exponential backoff
+                _log(f"Network error while contacting Google Sheets: {exc}", "error")
+                raise
+            time.sleep(delay * (2**attempt))
+        except Exception as exc:
+            if attempt == retries - 1:
+                _log(f"Failed to connect to Google Sheets: {exc}", "error")
+                raise
             time.sleep(delay * (2**attempt))
 
 
-def load_google_sheet_as_dataframe():
+def load_google_sheet_as_dataframe() -> pd.DataFrame:
     """Always loads the Google Sheet fresh, no caching."""
-    ws = _get_sheet()  # LIVE connection
-    data = ws.get_all_records()  # ALWAYS fresh
-    return pd.DataFrame(data)
+    try:
+        ws = _get_sheet()
+        data = ws.get_all_records()
+        return pd.DataFrame(data)
+    except Exception as exc:
+        _log(f"Failed to load Google Sheet: {exc}", "error")
+        return pd.DataFrame(columns=CSV_COLUMNS)
 
 
 def canon_funder_url(url: str) -> str:
@@ -406,15 +485,12 @@ def append_to_google_sheet(rows: List[dict]):
 
         ws.append_rows(data, value_input_option="RAW")
     except Exception as e:
-        st.error(f"Failed to write to Google Sheets: {e}")
+        _log(f"Failed to write to Google Sheets: {e}", "error")
 
 
-@st.cache_data(show_spinner=False)
-def load_results_csv() -> pd.DataFrame:
-    """
-    Load from Google Sheets (persistent).
-    Local CSV is only fallback.
-    """
+@lru_cache(maxsize=1)
+def _load_results_csv_cached() -> pd.DataFrame:
+    """Internal cached loader used by load_results_csv()."""
     try:
         ws = _get_sheet()
         values = ws.get_all_values()
@@ -425,29 +501,43 @@ def load_results_csv() -> pd.DataFrame:
         rows = values[1:]
 
         df = pd.DataFrame(rows, columns=header)
+    except Exception as exc:
+        _log(f"Error loading from Google Sheet: {exc}", "error")
+        df = pd.DataFrame(columns=CSV_COLUMNS)
 
-        # Make sure all expected columns exist
-        for col in CSV_COLUMNS:
-            if col not in df.columns:
-                df[col] = ""
+    for col in CSV_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
 
-        return df[CSV_COLUMNS]
-
-    except Exception as e:
-        st.error(f"Error loading from Google Sheet: {e}")
-        return pd.DataFrame(columns=CSV_COLUMNS)
+    return df[CSV_COLUMNS]
 
 
-@st.cache_data(show_spinner=False)
-def get_already_processed_urls() -> Set[str]:
+def load_results_csv(force_refresh: bool = False) -> pd.DataFrame:
+    """
+    Load from Google Sheets (persistent).
+    Returns a defensive copy so callers can modify freely.
+    """
+    if force_refresh:
+        _load_results_csv_cached.cache_clear()
+    return _load_results_csv_cached().copy()
+
+
+@lru_cache(maxsize=1)
+def _get_already_processed_urls_cached() -> Set[str]:
     df = load_results_csv()
     if "fund_url" in df.columns:
         return {normalize_url(u) for u in df["fund_url"].dropna().astype(str).tolist()}
     return set()
 
 
-@st.cache_data(show_spinner=False)
-def get_scraped_domains(save_dir: str = SAVE_DIR) -> Set[str]:
+def get_already_processed_urls(force_refresh: bool = False) -> Set[str]:
+    if force_refresh:
+        _get_already_processed_urls_cached.cache_clear()
+    return set(_get_already_processed_urls_cached())
+
+
+@lru_cache(maxsize=4)
+def _get_scraped_domains_cached(save_dir: str) -> Set[str]:
     if not os.path.exists(save_dir):
         return set()
     scraped = set()
@@ -456,6 +546,23 @@ def get_scraped_domains(save_dir: str = SAVE_DIR) -> Set[str]:
         if os.path.isdir(item_path):
             scraped.add(item.lower())
     return scraped
+
+
+def get_scraped_domains(save_dir: str = SAVE_DIR, force_refresh: bool = False) -> Set[str]:
+    if force_refresh:
+        _get_scraped_domains_cached.cache_clear()
+    return set(_get_scraped_domains_cached(save_dir))
+
+
+def clear_results_cache() -> None:
+    """Clear cached Google Sheet results and processed URL sets."""
+    _load_results_csv_cached.cache_clear()
+    _get_already_processed_urls_cached.cache_clear()
+
+
+def clear_scraped_domains_cache() -> None:
+    """Clear cached scraped-domain lookups."""
+    _get_scraped_domains_cached.cache_clear()
 
 
 def save_results_to_csv(results: List[dict], output_csv: str = OUTPUT_CSV):
@@ -471,8 +578,7 @@ def save_results_to_csv(results: List[dict], output_csv: str = OUTPUT_CSV):
         results_df.to_csv(output_csv, mode="a", index=False, header=False)
     else:
         results_df.to_csv(output_csv, index=False)
-    load_results_csv.clear()
-    get_already_processed_urls.clear()
+    clear_results_cache()
 
 
 def load_text_from_folder(folder_path: str) -> tuple[str, int, str]:
@@ -541,32 +647,28 @@ def process_single_fund(url: str, fund_name: Optional[str] = None) -> dict:
 # -----------------------------
 # BACKGROUND SCRAPE WORKER
 # -----------------------------
-def start_background_scrape(urls):
+def start_background_scrape(urls: List[str]) -> ScrapeProgress:
+    """
+    Kick off a background scrape for the provided URLs.
+    Returns a ScrapeProgress object that callers can poll.
+    """
+
+    progress = ScrapeProgress()
+    total = max(len(urls), 1)
+
     def worker():
-        st.session_state.scrape_done = False
-        st.session_state.scrape_progress = 0
-        st.session_state.scrape_results = []
-        st.session_state.scrape_errors = []
-
-        total = len(urls)
-
-        for i, url in enumerate(urls, start=1):
+        for idx, url in enumerate(urls, start=1):
             try:
-                # MUST stay clean: no Streamlit calls inside
                 res = process_single_fund(url)
-                st.session_state.scrape_results.append(res)
-
+                progress.results.append(res)
                 if res.get("error"):
-                    st.session_state.scrape_errors.append((url, res["error"]))
+                    progress.errors.append((url, res["error"]))
+            except Exception as exc:
+                progress.errors.append((url, str(exc)))
 
-            except Exception as e:
-                st.session_state.scrape_errors.append((url, str(e)))
+            progress.progress_percent = int(idx / total * 100)
 
-            # Pure Python update (SAFE)
-            st.session_state.scrape_progress = int(i / total * 100)
-
-        # IMPORTANT: DO NOT write to Google Sheets here!
-        # That requires a ScriptRunContext.
-        st.session_state.scrape_done = True
+        progress.done = True
 
     threading.Thread(target=worker, daemon=True).start()
+    return progress

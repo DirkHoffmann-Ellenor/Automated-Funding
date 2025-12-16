@@ -611,6 +611,7 @@ def load_text_from_folder(folder_path: str) -> tuple[str, int, str]:
 def process_single_fund(url: str, fund_name: Optional[str] = None) -> dict:
     fund_name = fund_name or urlparse(url).netloc
     result = {"fund_url": url, "fund_name": fund_name, "extraction_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    # TODO: Emit structured log/metric events for each scrape stage to aid backend observability.
     try:
         text, folder, pages_scraped, visited_urls = prioritized_crawl(url)
         if not text or len(text) < 100:
@@ -656,6 +657,7 @@ def start_background_scrape(urls: List[str]) -> ScrapeProgress:
     progress = ScrapeProgress()
     total = max(len(urls), 1)
 
+    # TODO: push incremental progress updates to the API layer (webhooks/websockets) instead of only polling.
     def worker():
         for idx, url in enumerate(urls, start=1):
             try:

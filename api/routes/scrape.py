@@ -54,6 +54,7 @@ def job_status(job_id: str):
 
     snapshot = job.snapshot()
     errors = [JobError(url=err[0], message=err[1]) for err in snapshot["errors"]]
+    # TODO: extend this endpoint (or add websockets/server-sent events) to push live status updates to clients.
     return JobStatusResponse(
         job_id=snapshot["job_id"],
         done=snapshot["done"],

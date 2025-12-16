@@ -275,3 +275,8 @@ out/
 *.DS_Store
 
 Scraping of Websites/GrantNav/debug_html/*.txt
+
+
+Scraped/lordandladywolfson.org.uk/lordandladywolfson.org.uk_dr-padmasayee-papineni-bsc-mbbs-frcp-diphiv-dmcc-dtmh-awarded-a-funded-fellowship-place-on-the-emerging-women-leaders-progra.txt
+Scraped/www.gov.uk_government_organisations_home-office/www.gov.uk_guidance_apply-for-communication-support-at-a-job-interview-if-you-have-a-disability-or-health-condition-access-to-work.txt
+Scraped/www.nisalocally.co.uk_community/www.nisalocally.co.uk_community_success-stories_bradley-s-supermarket-supports-local-families-with-2-700-donation-to-the-white-horse-wishing-well.txt

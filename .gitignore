@@ -222,4 +222,25 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+<<<<<<< HEAD
 GrantNav/debug_html/*
+=======
+
+# Node / Frontend
+node_modules/
+frontend/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+
+# Next.js
+.next/
+out/
+
+# OS / binaries
+*.node
+
+*.DS_Store
+>>>>>>> 82e57da08f646593da43bc2796fc98f4dfd26968

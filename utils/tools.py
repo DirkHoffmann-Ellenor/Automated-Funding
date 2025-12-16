@@ -1,8 +1,6 @@
 from Web_scraper_2 import OUTPUT_CSV
-from utils.constants import (
-    SAVE_DIR, DISCOVERY_DEPTH, MAX_PAGES, MAX_DISCOVERY_PAGES,
-    PAUSE_BETWEEN_REQUESTS, HEADERS, CSV_COLUMNS, KEYWORDS, LLM_PROMPT, ELIGIBILITY_ORDER
-)
+from utils.constants import SAVE_DIR, DISCOVERY_DEPTH, MAX_PAGES, MAX_DISCOVERY_PAGES, PAUSE_BETWEEN_REQUESTS, HEADERS, CSV_COLUMNS, KEYWORDS, LLM_PROMPT, ELIGIBILITY_ORDER
+
 import os, re, time, json, requests, pandas as pd
 import streamlit as st
 from bs4 import BeautifulSoup
@@ -16,6 +14,7 @@ from google.oauth2.service_account import Credentials
 import threading
 import time
 
+
 # ========== API KEY VAULT =========
 def get_client() -> Optional[OpenAI]:
     api_key = st.session_state.get("api_key", "").strip()
@@ -26,9 +25,11 @@ def get_client() -> Optional[OpenAI]:
     except Exception:
         return None
 
+
 # ==================================
 # ========== UTIL HELPERS ==========
 # ==================================
+
 
 def safe_filename_from_url(url: str) -> str:
     parsed = urlparse(url)
@@ -36,6 +37,7 @@ def safe_filename_from_url(url: str) -> str:
     name = name.strip("/").replace("/", "_")
     name = re.sub(r"[^a-zA-Z0-9._-]", "_", name)
     return name[:150]
+
 
 def normalize_url(url: str) -> str:
     """Simple normalization for deduplication within one domain."""
@@ -46,11 +48,12 @@ def normalize_url(url: str) -> str:
     qs = ("?" + parsed.query) if parsed.query else ""
     return f"{scheme}://{netloc}{path}{qs}"
 
+
 def initial_normalize_url(url: str) -> str:
     """
     For initial seed URLs (user-provided), produce a base link to restrict crawling.
     e.g. turns
-    https://register-of-charities.charitycommission.gov.uk/en/charity-search/-/charity-details/1010625/charity-overview?... 
+    https://register-of-charities.charitycommission.gov.uk/en/charity-search/-/charity-details/1010625/charity-overview?...
     into
     https://register-of-charities.charitycommission.gov.uk/en/charity-search/-/charity-details/1010625
     """
@@ -74,6 +77,7 @@ def initial_normalize_url(url: str) -> str:
     normalized = f"{scheme}://{netloc}{path}"
     return normalized
 
+
 def _log(msg: str, level: str = "info"):
     st.session_state.logs.append((level, msg))
     if level == "error":
@@ -85,12 +89,13 @@ def _log(msg: str, level: str = "info"):
     else:
         st.write(msg)
 
+
 def fetch_page(url: str, retries: int = 4, backoff_factor: int = 2) -> Optional[str]:
     for attempt in range(retries):
         try:
             resp = requests.get(url, headers=HEADERS, timeout=20)
             if resp.status_code == 429:
-                wait = int(resp.headers.get("Retry-After", (backoff_factor ** attempt) * 5))
+                wait = int(resp.headers.get("Retry-After", (backoff_factor**attempt) * 5))
                 _log(f"Rate limited ({resp.status_code}) – pausing {wait}s", "warning")
                 time.sleep(wait)
                 continue
@@ -98,12 +103,13 @@ def fetch_page(url: str, retries: int = 4, backoff_factor: int = 2) -> Optional[
             return resp.text
         except requests.exceptions.RequestException as e:
             if attempt < retries - 1:
-                pause = (backoff_factor ** attempt) * 2
+                pause = (backoff_factor**attempt) * 2
                 _log(f"Fetch failed: {url} ({e}); retrying in {pause}s", "warning")
                 time.sleep(pause)
             else:
                 _log(f"Fetch failed for {url}: {e}", "error")
     return None
+
 
 def extract_visible_text(html: str) -> str:
     soup = BeautifulSoup(html, "html.parser")
@@ -112,8 +118,8 @@ def extract_visible_text(html: str) -> str:
     text = " ".join(t.get_text(" ", strip=True) for t in soup.find_all(["h1", "h2", "h3", "p", "li", "td", "th"]))
     return re.sub(r"\s+", " ", text).strip()
 
-def discover_links(seed_url: str, discovery_depth: int = DISCOVERY_DEPTH,
-                   max_pages: int = MAX_DISCOVERY_PAGES) -> Dict:
+
+def discover_links(seed_url: str, discovery_depth: int = DISCOVERY_DEPTH, max_pages: int = MAX_DISCOVERY_PAGES) -> Dict:
     """
     Crawl only pages related to the same base entity (same charity ID or program).
     For Charity Commission, restrict to links that start with the seed base path.
@@ -138,7 +144,7 @@ def discover_links(seed_url: str, discovery_depth: int = DISCOVERY_DEPTH,
         soup = BeautifulSoup(html, "html.parser")
         title = soup.title.string.strip() if soup.title and soup.title.string else ""
         snippet = ""
-        if (p := soup.find("p")):
+        if p := soup.find("p"):
             snippet = p.get_text(" ", strip=True)[:300]
 
         for a in soup.find_all("a", href=True):
@@ -148,8 +154,7 @@ def discover_links(seed_url: str, discovery_depth: int = DISCOVERY_DEPTH,
             parsed_href = urlparse(href)
             if base_domain not in parsed_href.netloc:
                 continue
-            if any(href.lower().endswith(ext) for ext in [".pdf", ".jpg", ".jpeg", ".png",
-                                                           ".zip", ".mp4", ".doc", ".docx"]):
+            if any(href.lower().endswith(ext) for ext in [".pdf", ".jpg", ".jpeg", ".png", ".zip", ".mp4", ".doc", ".docx"]):
                 continue
 
             # Restrict to links under the same base path for Charity Commission
@@ -159,11 +164,7 @@ def discover_links(seed_url: str, discovery_depth: int = DISCOVERY_DEPTH,
 
             hnorm = normalize_url(href)
             anchor = (a.get_text(" ", strip=True) or "").strip()
-            meta = candidates.setdefault(hnorm, {
-                "anchor_texts": set(),
-                "source_titles": set(),
-                "source_snippets": set()
-            })
+            meta = candidates.setdefault(hnorm, {"anchor_texts": set(), "source_titles": set(), "source_snippets": set()})
             if anchor:
                 meta["anchor_texts"].add(anchor)
             if title:
@@ -177,6 +178,7 @@ def discover_links(seed_url: str, discovery_depth: int = DISCOVERY_DEPTH,
 
     _log(f"➕ Found {len(candidates)} internal links (visited {pages_visited} pages) from {seed_base}")
     return candidates
+
 
 def score_candidate(url: str, meta: Dict) -> int:
     score = 0
@@ -207,11 +209,7 @@ def prioritized_crawl(seed_url: str) -> Tuple[str, str, int, List[str]]:
     os.makedirs(domain_folder, exist_ok=True)
 
     candidates = discover_links(seed_norm)
-    candidates.setdefault(seed_norm, {
-        "anchor_texts": set(),
-        "source_titles": set(),
-        "source_snippets": set()
-    })
+    candidates.setdefault(seed_norm, {"anchor_texts": set(), "source_titles": set(), "source_snippets": set()})
     scored = [(score_candidate(url, meta), url) for url, meta in candidates.items()]
     scored.sort(reverse=True)
 
@@ -234,6 +232,7 @@ def prioritized_crawl(seed_url: str) -> Tuple[str, str, int, List[str]]:
     combined_text = " ".join(all_text)
     return combined_text, domain_folder, len(all_text), top_links
 
+
 def call_llm_extract(text: str) -> Dict:
     client = get_client()
     if client is None:
@@ -247,13 +246,13 @@ def call_llm_extract(text: str) -> Dict:
             "deadline": "",
             "notes": "LLM not configured (no API key).",
             "eligibility": "Low Match",
-            "evidence": "LLM extraction skipped (no API key)."
+            "evidence": "LLM extraction skipped (no API key).",
         }
 
     max_chars = 50000
     if len(text) > max_chars:
         _log(f"Text truncated from {len(text)} to {max_chars} chars", "warning")
-        text = text[:max_chars//2] + "\n...[content truncated]...\n" + text[-max_chars//2:]
+        text = text[: max_chars // 2] + "\n...[content truncated]...\n" + text[-max_chars // 2 :]
 
     prompt = LLM_PROMPT.replace("{text}", text)
 
@@ -261,11 +260,14 @@ def call_llm_extract(text: str) -> Dict:
         resp = client.chat.completions.create(
             model="gpt-4.1",
             messages=[
-                {"role": "system", "content": "You are an expert at evaluating charity funding eligibility. You extract structured data and provide accurate eligibility assessments based on specific criteria."},
-                {"role": "user", "content": prompt}
+                {
+                    "role": "system",
+                    "content": "You are an expert at evaluating charity funding eligibility. You extract structured data and provide accurate eligibility assessments based on specific criteria.",
+                },
+                {"role": "user", "content": prompt},
             ],
             temperature=0,
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
         )
         output = resp.choices[0].message.content.strip()
         output = re.sub(r"^```json\s*|\s*```$", "", output, flags=re.MULTILINE)
@@ -281,7 +283,7 @@ def call_llm_extract(text: str) -> Dict:
             "deadline": data.get("deadline", ""),
             "notes": data.get("notes", ""),
             "eligibility": data.get("eligibility", "Low Match"),
-            "evidence": data.get("evidence", "")
+            "evidence": data.get("evidence", ""),
         }
 
         if normalized["eligibility"] not in ELIGIBILITY_ORDER:
@@ -306,7 +308,7 @@ def call_llm_extract(text: str) -> Dict:
             "deadline": "",
             "notes": f"JSON parsing error: {str(e)}",
             "eligibility": "Low Match",
-            "evidence": f"Error: Could not parse LLM response - {str(e)}"
+            "evidence": f"Error: Could not parse LLM response - {str(e)}",
         }
     except Exception as e:
         _log(f"LLM extraction failed: {e}", "error")
@@ -320,7 +322,7 @@ def call_llm_extract(text: str) -> Dict:
             "deadline": "",
             "notes": f"Extraction failed: {str(e)}",
             "eligibility": "Low Match",
-            "evidence": f"Error: LLM extraction failed - {str(e)}"
+            "evidence": f"Error: LLM extraction failed - {str(e)}",
         }
 
 
@@ -329,12 +331,9 @@ def folder_name_for_url(u: str) -> str:
 
 
 def _get_sheet(retries=3, delay=1):
-    
+
     def try_connect():
-        creds = Credentials.from_service_account_info(
-            st.secrets["gcp_service_account"],
-            scopes=["https://www.googleapis.com/auth/spreadsheets"]
-        )
+        creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=["https://www.googleapis.com/auth/spreadsheets"])
         client = gspread.authorize(creds)
         sheet_id = st.secrets["google"]["google_sheet_id"]
         sh = client.open_by_key(sheet_id)  # network call
@@ -351,13 +350,15 @@ def _get_sheet(retries=3, delay=1):
                 raise e
 
             # Exponential backoff
-            time.sleep(delay * (2 ** attempt))
+            time.sleep(delay * (2**attempt))
+
 
 def load_google_sheet_as_dataframe():
     """Always loads the Google Sheet fresh, no caching."""
-    ws = _get_sheet()                      # LIVE connection
-    data = ws.get_all_records()            # ALWAYS fresh
+    ws = _get_sheet()  # LIVE connection
+    data = ws.get_all_records()  # ALWAYS fresh
     return pd.DataFrame(data)
+
 
 def canon_funder_url(url: str) -> str:
     """
@@ -407,6 +408,7 @@ def append_to_google_sheet(rows: List[dict]):
     except Exception as e:
         st.error(f"Failed to write to Google Sheets: {e}")
 
+
 @st.cache_data(show_spinner=False)
 def load_results_csv() -> pd.DataFrame:
     """
@@ -435,12 +437,14 @@ def load_results_csv() -> pd.DataFrame:
         st.error(f"Error loading from Google Sheet: {e}")
         return pd.DataFrame(columns=CSV_COLUMNS)
 
+
 @st.cache_data(show_spinner=False)
 def get_already_processed_urls() -> Set[str]:
     df = load_results_csv()
     if "fund_url" in df.columns:
         return {normalize_url(u) for u in df["fund_url"].dropna().astype(str).tolist()}
     return set()
+
 
 @st.cache_data(show_spinner=False)
 def get_scraped_domains(save_dir: str = SAVE_DIR) -> Set[str]:
@@ -452,6 +456,7 @@ def get_scraped_domains(save_dir: str = SAVE_DIR) -> Set[str]:
         if os.path.isdir(item_path):
             scraped.add(item.lower())
     return scraped
+
 
 def save_results_to_csv(results: List[dict], output_csv: str = OUTPUT_CSV):
     if not results:
@@ -469,6 +474,7 @@ def save_results_to_csv(results: List[dict], output_csv: str = OUTPUT_CSV):
     load_results_csv.clear()
     get_already_processed_urls.clear()
 
+
 def load_text_from_folder(folder_path: str) -> tuple[str, int, str]:
     txt_files = list(Path(folder_path).glob("*.txt"))
     if not txt_files:
@@ -478,11 +484,11 @@ def load_text_from_folder(folder_path: str) -> tuple[str, int, str]:
     txt_files.sort()
     for txt_file in txt_files:
         try:
-            with open(txt_file, 'r', encoding='utf-8', errors='ignore') as f:
+            with open(txt_file, "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read()
                 combined_text.append(f"\n=== {txt_file.name} ===\n{content}")
                 if not fund_url and "_" in txt_file.name:
-                    domain = txt_file.name.split('_')[0]
+                    domain = txt_file.name.split("_")[0]
                     fund_url = f"https://{domain}"
         except Exception as e:
             _log(f"Could not read {txt_file}: {e}", "warning")
@@ -495,13 +501,10 @@ def load_text_from_folder(folder_path: str) -> tuple[str, int, str]:
 # ========== BATCH / SCRAPE FLOW ==========
 # =========================================
 
+
 def process_single_fund(url: str, fund_name: Optional[str] = None) -> dict:
     fund_name = fund_name or urlparse(url).netloc
-    result = {
-        "fund_url": url,
-        "fund_name": fund_name,
-        "extraction_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    }
+    result = {"fund_url": url, "fund_name": fund_name, "extraction_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
     try:
         text, folder, pages_scraped, visited_urls = prioritized_crawl(url)
         if not text or len(text) < 100:

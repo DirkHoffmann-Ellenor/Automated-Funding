@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  @apply bg-slate-50 text-slate-900;
+}
+
+.sidebar-link {
+  @apply flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition hover:bg-slate-200;
+}
+
+input, textarea, select {
+  @apply rounded-md border border-slate-300 bg-white px-3 py-2 shadow-sm focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand;
+}
+
+button {
+  @apply inline-flex items-center justify-center rounded-md bg-brand px-4 py-2 font-semibold text-white shadow hover:bg-brand-dark focus:outline-none focus:ring-2 focus:ring-brand focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50;
+}

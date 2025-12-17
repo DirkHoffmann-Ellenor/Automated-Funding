@@ -12,7 +12,7 @@ class AppConfig:
     openai_api_key: Optional[str]
     google_sheet_id: Optional[str]
     gcp_service_account: Optional[Dict[str, Any]]
-    log_level: str = "INFO"
+    log_level: str = "DEBUG"
 
     @classmethod
     def load(cls) -> "AppConfig":

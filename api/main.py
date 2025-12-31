@@ -9,13 +9,15 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api import dependencies
 from api.config import settings
-from api.routes import health, results, scrape
+from api.routes import health, results, scrape, settings
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     logging.basicConfig(level=settings.log_level)
-    dependencies.ensure_configured()
+    # Temporarily disable startup dependency configuration to avoid long hangs in Azure.
+    # Re-enable once secrets/config are confirmed working.
+    # dependencies.ensure_configured()
     yield
 
 
@@ -33,6 +35,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(results.router)
     app.include_router(scrape.router)
+    app.include_router(settings.router)
 
     return app
 

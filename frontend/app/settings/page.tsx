@@ -1,49 +1,84 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { api } from "../../lib/api";
+import { Button } from "../../components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card";
+import { Input } from "../../components/ui/input";
+import { Label } from "../../components/ui/label";
+
+const LOCAL_OPENAI_KEY = "ellenor_openai_key";
 
 export default function SettingsPage() {
   const [apiKey, setApiKey] = useState("");
-  const [sheetId, setSheetId] = useState("");
+  const [sheetId] = useState("Managed on server");
   const [status, setStatus] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
 
-  const handleSave = () => {
-    setStatus("Settings saved locally. Configure environment variables in Azure for production.");
-    localStorage.setItem("ellenor_api_key", apiKey);
-    localStorage.setItem("ellenor_sheet_id", sheetId);
+  useEffect(() => {
+    const cached = localStorage.getItem(LOCAL_OPENAI_KEY);
+    if (cached) setApiKey(cached);
+  }, []);
+
+  const handleSave = async () => {
+    setStatus(null);
+    setError(null);
+    setSaving(true);
+    try {
+      await api.updateOpenAIKey(apiKey);
+      localStorage.setItem(LOCAL_OPENAI_KEY, apiKey);
+      setStatus("OpenAI key applied to the API for this session and saved in your browser.");
+    } catch (err: any) {
+      setError(err?.message || "Could not update OpenAI key.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
     <div className="space-y-6">
       <header>
-        <p className="text-sm uppercase tracking-wide text-slate-500">Settings</p>
-        <h1 className="text-3xl font-bold text-slate-900">API & storage configuration</h1>
-        <p className="text-sm text-slate-600">Values set here are only stored in your browser for preview. Use platform secrets for production.</p>
+        <p className="text-sm uppercase tracking-wide text-neutral-500">Settings</p>
+        <h1 className="text-3xl font-bold text-neutral-950">API & storage configuration</h1>
+        <p className="text-sm text-neutral-600">
+          Google Sheets credentials stay on the server. Use this page to change the OpenAI API key without touching Azure
+          secrets.
+        </p>
       </header>
-      <section className="rounded-2xl bg-white p-6 shadow">
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div>
-            <label className="text-sm font-medium">OpenAI API Key</label>
-            <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="sk-..." />
+      <Card>
+        <CardHeader>
+          <CardTitle>OpenAI runtime key</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="api-key">OpenAI API Key</Label>
+              <Input
+                id="api-key"
+                type="password"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder="sk-..."
+                autoComplete="off"
+              />
+              <p className="text-xs text-neutral-500">
+                Stored locally in this browser and pushed to the API for the current session only.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="sheet-id">Google Sheet ID</Label>
+              <Input id="sheet-id" value={sheetId} disabled className="text-neutral-500" />
+              <p className="text-xs text-neutral-500">Managed server-side with the service account and not editable here.</p>
+            </div>
           </div>
-          <div>
-            <label className="text-sm font-medium">Google Sheet ID</label>
-            <input value={sheetId} onChange={(e) => setSheetId(e.target.value)} placeholder="1abcdEf..." />
-          </div>
-        </div>
-        <button className="mt-4" onClick={handleSave}>
-          Save to browser
-        </button>
-        {status && <p className="mt-3 text-sm text-slate-600">{status}</p>}
-      </section>
-      <section className="rounded-2xl bg-slate-900 p-6 text-white">
-        <h2 className="text-xl font-semibold">Deploying to Azure</h2>
-        <ol className="mt-4 list-decimal space-y-2 pl-6 text-sm text-slate-200">
-          <li>Set <code>OPENAI_API_KEY</code>, <code>GOOGLE_SHEET_ID</code>, and <code>GCP_SERVICE_ACCOUNT_JSON</code> in Azure Container Apps.</li>
-          <li>Expose the FastAPI host via Azure Static Web Apps custom domain.</li>
-          <li>Configure <code>NEXT_PUBLIC_API_BASE_URL</code> for the frontend environment.</li>
-        </ol>
-      </section>
+          <Button className="mt-2" onClick={handleSave} disabled={saving || !apiKey.trim()}>
+            {saving ? "Saving..." : "Apply to API"}
+          </Button>
+          {status && <p className="text-sm text-neutral-600">{status}</p>}
+          {error && <p className="text-sm text-red-600">{error}</p>}
+        </CardContent>
+      </Card>
     </div>
   );
 }

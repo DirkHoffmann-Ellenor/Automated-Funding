@@ -1,0 +1,125 @@
+Automated Funding backend -> Azure Container Apps (Docker)
+Run these commands in PowerShell from the repo root (`.../Automated-Funding`). This version includes required secrets (Google Sheets + OpenAI) from the start, plus a section at the end for updating secrets on an already-running container app.
+
+# ---------------------------
+# Fresh deploy (with secrets)
+# ---------------------------
+
+1) Set deployment variables (ACR name must be globally unique, lower-case letters/numbers only)
+   $env:RESOURCE_GROUP="af-containerapps"
+   $env:LOCATION="eastus"
+   $env:ENVIRONMENT="env-af-containerapps"
+   $env:API_NAME="automated-funding-api"
+   $env:ACR_NAME="afcontainerregistry01"
+   $env:IDENTITY="af-containerapps-identity"
+   $env:IMAGE_NAME="automated-funding-api"
+   $env:IMAGE_TAG="latest"
+   $env:IMAGE_FULL="$($env:ACR_NAME).azurecr.io/$($env:IMAGE_NAME):$($env:IMAGE_TAG)"
+
+   # Required app secrets (must be set before deploying)
+   # Option A: read service account JSON from a local file
+   #   $env:GCP_SERVICE_ACCOUNT_JSON = Get-Content -Raw ".\gcp-service-account.json"
+   # Option B: paste the JSON string directly
+   #   $env:GCP_SERVICE_ACCOUNT_JSON = '{"type":"service_account",...}'
+   $env:GOOGLE_SHEET_ID = "<sheet-id>"          # from the Google Sheet URL
+   $env:OPENAI_API_KEY   = "<your-openai-key>"  # for LLM extraction
+
+2) Log in to Azure (ensure az CLI + Docker Desktop are installed)
+   az login
+   az account set --subscription "<your-subscription-id-or-name>"
+   az extension add --name containerapp --upgrade
+   az provider register --namespace Microsoft.App
+   az provider register --namespace Microsoft.OperationalInsights
+
+3) Create the resource group
+   az group create --name $env:RESOURCE_GROUP --location $env:LOCATION
+
+4) Create Azure Container Registry and enable managed identity-based pull
+   az acr create --resource-group $env:RESOURCE_GROUP --location $env:LOCATION --name $env:ACR_NAME --sku Basic
+   az acr config authentication-as-arm update --registry $env:ACR_NAME --status enabled
+
+5) Create a user-assigned managed identity and capture its resource id
+   az identity create --name $env:IDENTITY --resource-group $env:RESOURCE_GROUP
+   $env:IDENTITY_ID = $(az identity show --name $env:IDENTITY --resource-group $env:RESOURCE_GROUP --query id --output tsv)
+
+6) Build and push the backend image (uses Dockerfile in this repo; app listens on port 8000)
+   docker build --tag $env:IMAGE_FULL .
+   az acr login --name $env:ACR_NAME
+   docker push $env:IMAGE_FULL
+
+7) Create the Container Apps environment
+   az containerapp env create --name $env:ENVIRONMENT --resource-group $env:RESOURCE_GROUP --location $env:LOCATION
+
+8) Deploy the container app pointing to the pushed image (initial deploy)
+   az containerapp create `
+     --name $env:API_NAME `
+     --resource-group $env:RESOURCE_GROUP `
+     --environment $env:ENVIRONMENT `
+     --image $env:IMAGE_FULL `
+     --target-port 8000 `
+     --ingress external `
+     --registry-server "$($env:ACR_NAME).azurecr.io" `
+     --user-assigned "$env:IDENTITY_ID" `
+     --registry-identity "$env:IDENTITY_ID" `
+     --query properties.configuration.ingress.fqdn
+
+9) Add secrets and wire env vars (Google Sheets + OpenAI)
+   az containerapp secret set `
+     --name $env:API_NAME `
+     --resource-group $env:RESOURCE_GROUP `
+     --secrets gcp-sa-json="$env:GCP_SERVICE_ACCOUNT_JSON" openai-api-key="$env:OPENAI_API_KEY"
+
+   az containerapp update `
+     --name $env:API_NAME `
+     --resource-group $env:RESOURCE_GROUP `
+     --set-env-vars `
+       GCP_SERVICE_ACCOUNT_JSON=secretref:gcp-sa-json `
+       OPENAI_API_KEY=secretref:openai-api-key `
+       GOOGLE_SHEET_ID="$env:GOOGLE_SHEET_ID" `
+       LOG_LEVEL="INFO"
+
+10) Capture the FQDN and test the health endpoint
+    $env:API_FQDN = $(az containerapp show --name $env:API_NAME --resource-group $env:RESOURCE_GROUP --query properties.configuration.ingress.fqdn --output tsv)
+    curl -s "https://$env:API_FQDN/health"
+    # Expect: {"status":"ok"}
+
+11) (Optional) Redeploy after code changes
+    docker build --tag $env:IMAGE_FULL .
+    docker push $env:IMAGE_FULL
+    az containerapp update --name $env:API_NAME --resource-group $env:RESOURCE_GROUP --image $env:IMAGE_FULL
+
+# -----------------------------------------------------
+# Update/add secrets on an existing running container app
+# -----------------------------------------------------
+# Use this when you need to rotate keys or add new secrets without redeploying the image.
+
+A) Set the new secret values (same env vars as above)
+   # Example: rotate OpenAI key and service account JSON
+   $env:GCP_SERVICE_ACCOUNT_JSON = Get-Content -Raw ".\gcp-service-account.json"
+   $env:OPENAI_API_KEY = "<new-openai-key>"
+   $env:GOOGLE_SHEET_ID = "<sheet-id>"  # only if changed
+
+B) Push the new secrets
+   az containerapp secret set `
+     --name $env:API_NAME `
+     --resource-group $env:RESOURCE_GROUP `
+     --secrets gcp-sa-json="$env:GCP_SERVICE_ACCOUNT_JSON" 
+     --secrets google-sheet-id=" $env:GOOGLE_SHEETS_ID"
+     --secrets openai-api-key="$env:OPENAI_API_KEY"
+
+C) Wire env vars to the (possibly updated) secrets/values
+   az containerapp update `
+     --name $env:API_NAME `
+     --resource-group $env:RESOURCE_GROUP `
+     --set-env-vars `
+       GOOGLE_SHEET_ID="$env:GOOGLE_SHEET_ID" `
+       GCP_SERVICE_ACCOUNT_JSON=secretref:gcp-sa-json `
+       OPENAI_API_KEY=secretref:openai-api-key `
+       LOG_LEVEL="INFO"
+
+D) Verify after restart
+   $env:API_FQDN = $(az containerapp show --name $env:API_NAME --resource-group $env:RESOURCE_GROUP --query properties.configuration.ingress.fqdn --output tsv)
+   curl -s "https://$env:API_FQDN/health"
+   curl -s "https://$env:API_FQDN/results/"
+
+

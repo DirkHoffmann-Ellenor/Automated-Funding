@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urlparse
 
 import gspread
@@ -50,6 +50,11 @@ class ScrapeProgress:
     progress_percent: int = 0
     results: List[dict] = field(default_factory=list)
     errors: List[Tuple[str, str]] = field(default_factory=list)
+    started_at: Optional[float] = None
+    finished_at: Optional[float] = None
+    current_url: Optional[str] = None
+    current_started_at: Optional[float] = None
+    url_timings: List[Dict[str, Any]] = field(default_factory=list)
 
 
 _SETTINGS = ToolSettings()
@@ -484,6 +489,7 @@ def append_to_google_sheet(rows: List[dict]):
             data.append(row)
 
         ws.append_rows(data, value_input_option="RAW")
+        clear_results_cache()
     except Exception as e:
         _log(f"Failed to write to Google Sheets: {e}", "error")
 
@@ -611,6 +617,7 @@ def load_text_from_folder(folder_path: str) -> tuple[str, int, str]:
 def process_single_fund(url: str, fund_name: Optional[str] = None) -> dict:
     fund_name = fund_name or urlparse(url).netloc
     result = {"fund_url": url, "fund_name": fund_name, "extraction_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    # TODO: Emit structured log/metric events for each scrape stage to aid backend observability.
     try:
         text, folder, pages_scraped, visited_urls = prioritized_crawl(url)
         if not text or len(text) < 100:
@@ -641,6 +648,13 @@ def process_single_fund(url: str, fund_name: Optional[str] = None) -> dict:
         else:
             _log(f"Processing failed for {url}: {msg}", "error")
         result["error"] = msg
+    finally:
+        # Persist to Google Sheet as soon as each fund finishes (even if errored)
+        try:
+            append_to_google_sheet([result])
+            clear_results_cache()
+        except Exception as e:  # pragma: no cover - external dependency
+            _log(f"Failed to persist {url} to Google Sheets: {e}", "error")
     return result
 
 
@@ -653,22 +667,43 @@ def start_background_scrape(urls: List[str]) -> ScrapeProgress:
     Returns a ScrapeProgress object that callers can poll.
     """
 
-    progress = ScrapeProgress()
+    progress = ScrapeProgress(started_at=time.time())
     total = max(len(urls), 1)
 
+    # TODO: push incremental progress updates to the API layer (webhooks/websockets) instead of only polling.
     def worker():
         for idx, url in enumerate(urls, start=1):
             try:
+                progress.current_url = url
+                progress.current_started_at = time.time()
                 res = process_single_fund(url)
                 progress.results.append(res)
                 if res.get("error"):
                     progress.errors.append((url, res["error"]))
             except Exception as exc:
                 progress.errors.append((url, str(exc)))
+                res = {"fund_url": url, "error": str(exc)}
+            finally:
+                if progress.current_started_at:
+                    duration = max(0.0, time.time() - progress.current_started_at)
+                else:
+                    duration = 0.0
+                progress.url_timings.append(
+                    {
+                        "url": url,
+                        "duration_seconds": duration,
+                        "started_at": progress.current_started_at or time.time(),
+                        "finished_at": time.time(),
+                        "error": res.get("error") if isinstance(res, dict) else None,
+                    }
+                )
+                progress.current_url = None
+                progress.current_started_at = None
 
             progress.progress_percent = int(idx / total * 100)
 
         progress.done = True
+        progress.finished_at = time.time()
 
     threading.Thread(target=worker, daemon=True).start()
     return progress

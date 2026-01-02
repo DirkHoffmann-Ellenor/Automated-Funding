@@ -187,7 +187,7 @@ export default function ResultsPage() {
         <p className="text-sm text-neutral-600">Hover or click a row to inspect the full scraped details.</p>
       </header>
 
-      <div className="grid gap-4 lg:grid-cols-[2fr,1fr]">
+      <div className="grid gap-4 lg:grid-cols-[2fr,1fr] items-start">
         <Card className="overflow-hidden">
           <div className="h-1 bg-gradient-to-r from-neutral-900 via-orange-500 to-neutral-900" />
           <CardHeader className="pb-4">
@@ -308,14 +308,14 @@ export default function ResultsPage() {
           </CardContent>
         </Card>
 
-        <Card className="lg:sticky lg:top-6">
+        <Card className="self-start sticky top-4 lg:max-h-[calc(100vh-2rem)]">
           <CardHeader className="pb-3">
             <CardTitle>Details</CardTitle>
             <CardDescription>
               Hover a row for a quick preview or click to pin. All fields below come directly from the results sheet.
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-3">
+          <CardContent className="space-y-3 max-h-[calc(100vh-7rem)] overflow-y-auto pr-1 lg:pr-2">
             {!activeResult && <p className="text-sm text-neutral-600">No row selected yet.</p>}
             {activeResult && (
               <>

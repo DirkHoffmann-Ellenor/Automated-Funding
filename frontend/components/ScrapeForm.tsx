@@ -74,6 +74,25 @@ export default function ScrapeForm() {
   const [hydratedCache, setHydratedCache] = useState(false);
   const lastCompletedJobId = useRef<string | null>(null);
 
+  const clearManualInput = () => {
+    setManualInput("");
+    setPrepError(null);
+    setPrepSummary(null);
+  };
+
+  const resetAll = () => {
+    setManualInput("");
+    setStagedUrls([]);
+    setPrepSummary(null);
+    setPrepError(null);
+    setJobError(null);
+    setJob(null);
+    setQueueStats({ uniqueDomains: 0, totalQueued: 0 });
+    lastCompletedJobId.current = null;
+    clearCache(SCRAPE_CACHE_KEY);
+    clearCache(RESULTS_FORCE_REFRESH_KEY);
+  };
+
   const detectedManualUrls = useMemo(() => extractUrls(manualInput), [manualInput]);
 
   useEffect(() => {
@@ -187,6 +206,8 @@ export default function ScrapeForm() {
   const clearQueue = () => {
     setStagedUrls([]);
     setQueueStats({ uniqueDomains: 0, totalQueued: 0 });
+    setPrepSummary(null);
+    setPrepError(null);
   };
   const startScrape = async () => {
     if (stagedUrls.length === 0) return;
@@ -219,15 +240,39 @@ export default function ScrapeForm() {
 
   return (
     <div className="space-y-8">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-xs uppercase tracking-wide text-neutral-500">Scrape controls</p>
+          <p className="text-sm text-neutral-700">Paste URLs, upload CSVs, queue them, and monitor jobs.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" size="sm" onClick={clearManualInput}>
+            Clear manual text
+          </Button>
+          <Button variant="outline" size="sm" onClick={resetAll}>
+            Reset all fields
+          </Button>
+        </div>
+      </div>
+
       <div className="grid gap-6 lg:grid-cols-2">
         <Card className="relative overflow-hidden">
           <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-neutral-900 via-orange-500 to-neutral-900" />
           <CardHeader className="pb-2">
-            <Badge variant="accent" className="w-fit">
-              Manual entry
-            </Badge>
-            <CardTitle>Paste one or many fund URLs</CardTitle>
-            <CardDescription>Enter as many URLs as you like – we will normalize and de-duplicate before scraping.</CardDescription>
+            <div className="flex items-start justify-between gap-3">
+              <div className="space-y-1">
+                <Badge variant="accent" className="w-fit">
+                  Manual entry
+                </Badge>
+                <CardTitle>Paste one or many fund URLs</CardTitle>
+                <CardDescription>
+                  Enter as many URLs as you like — we will normalize and de-duplicate before scraping.
+                </CardDescription>
+              </div>
+              <Button variant="ghost" size="sm" onClick={clearManualInput}>
+                Clear
+              </Button>
+            </div>
           </CardHeader>
           <CardContent className="space-y-4">
             <Textarea

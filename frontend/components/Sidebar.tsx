@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 const navItems = [
   { href: "/", label: "Scrape & Analyze", emoji: "S" },
@@ -10,13 +10,35 @@ const navItems = [
   { href: "/settings", label: "Settings", emoji: "Cfg" },
 ];
 
+const STORAGE_KEY = "sidebar_collapsed_v1";
+
 export default function Sidebar() {
   const pathname = usePathname();
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem(STORAGE_KEY) === "1";
+  });
+
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(STORAGE_KEY);
+      if (saved === "1") setCollapsed(true);
+    } catch {
+      // ignore read errors
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(STORAGE_KEY, collapsed ? "1" : "0");
+    } catch {
+      // ignore
+    }
+  }, [collapsed]);
 
   return (
     <aside
-      className={`relative flex flex-col overflow-hidden bg-gradient-to-b from-slate-900 via-slate-950 to-slate-900 text-white shadow-xl transition-all ${
+      className={`relative flex flex-col overflow-hidden bg-gradient-to-b from-slate-900 via-slate-950 to-slate-900 text-white shadow-xl transition-all duration-200 ${
         collapsed ? "w-16" : "w-72"
       }`}
     >
@@ -35,9 +57,11 @@ export default function Sidebar() {
           )}
         </div>
         <button
+          type="button"
           className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-sm font-semibold hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-brand"
           onClick={() => setCollapsed((v) => !v)}
           aria-label="Toggle navigation"
+          aria-pressed={collapsed}
         >
           {collapsed ? ">" : "<"}
         </button>
@@ -53,9 +77,14 @@ export default function Sidebar() {
               className={`sidebar-link ${collapsed ? "justify-center" : ""} ${
                 active ? "bg-white/15 text-white ring-1 ring-inset ring-white/20" : "text-slate-200"
               }`}
+              title={item.label}
             >
               <span className="text-lg">{item.emoji}</span>
-              {!collapsed && <span>{item.label}</span>}
+              <span
+                className={`whitespace-nowrap transition-opacity duration-150 ${collapsed ? "opacity-0" : "opacity-100"}`}
+              >
+                {item.label}
+              </span>
             </Link>
           );
         })}

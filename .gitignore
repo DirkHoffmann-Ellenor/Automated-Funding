@@ -65,6 +65,8 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+!frontend/lib/
+!frontend/lib/**
 
 # PyInstaller
 #   Usually these files are written by a python script from a template

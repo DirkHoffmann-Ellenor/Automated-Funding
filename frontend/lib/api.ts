@@ -23,11 +23,15 @@ export const api = {
   results: () => request<{ results: any[] }>("/results/"),
   scrapeSingle: (fundUrl: string, fundName?: string) =>
     request("/scrape/single", { method: "POST", body: JSON.stringify({ fund_url: fundUrl, fund_name: fundName }) }),
-  scrapeBatch: (fundUrls: string[]) =>
-    request("/scrape/batch", { method: "POST", body: JSON.stringify({ fund_urls: fundUrls }) }),
+  scrapeBatch: (fundUrls: string[], rescrapeUrls?: string[]) =>
+    request("/scrape/batch", {
+      method: "POST",
+      body: JSON.stringify({ fund_urls: fundUrls, rescrape_urls: rescrapeUrls || [] }),
+    }),
   jobStatus: (jobId: string) => request(`/scrape/jobs/${jobId}`),
   prepareUrls: (fundUrls: string[]) =>
     request("/scrape/prepare", { method: "POST", body: JSON.stringify({ fund_urls: fundUrls }) }),
+  refreshResults: () => request("/results/refresh", { method: "POST" }),
   updateOpenAIKey: (apiKey: string) =>
     request("/settings/openai", { method: "POST", body: JSON.stringify({ openai_api_key: apiKey }) }),
 };

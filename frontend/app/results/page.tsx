@@ -31,6 +31,14 @@ const eligibilityTone: Record<string, "accent" | "muted" | "outline"> = {
   "Not Eligible": "outline",
 };
 
+const eligibilityRowTone: Record<string, { base: string; hover: string }> = {
+  "Highly Eligible": { base: "bg-emerald-200", hover: "hover:bg-emerald-300" },
+  Eligible: { base: "bg-green-200", hover: "hover:bg-green-300" },
+  "Possibly Eligible": { base: "bg-amber-200", hover: "hover:bg-amber-300" },
+  "Low Match": { base: "bg-orange-200", hover: "hover:bg-orange-300" },
+  "Not Eligible": { base: "bg-rose-200", hover: "hover:bg-rose-300" },
+};
+
 const detailFields = [
   { accessor: "applicant_types", label: "Applicant types" },
   { accessor: "geographic_scope", label: "Geographic scope" },
@@ -282,12 +290,13 @@ export default function ResultsPage() {
                   {visibleResults.map((row, idx) => {
                     const isActive = activeResult?.fund_url === row.fund_url;
                     const isPinned = pinnedResult?.fund_url === row.fund_url;
+                    const tone = getEligibilityRowTone(row.eligibility);
                     return (
                       <TableRow
                         key={`${row.fund_url || "row"}-${idx}`}
-                        className={`${idx % 2 === 0 ? "bg-neutral-50/50" : ""} ${
-                          isActive ? "ring-1 ring-neutral-900/30" : ""
-                        } ${isPinned ? "bg-orange-50" : ""}`}
+                        className={`${tone.base} ${tone.hover} ${isActive ? "ring-1 ring-neutral-900/30" : ""} ${
+                          isPinned ? "ring-2 ring-orange-400/70" : ""
+                        }`}
                         onMouseEnter={() => setHoveredResult(row)}
                         onMouseLeave={() => setHoveredResult(null)}
                         onClick={() => setPinnedResult(isPinned ? null : row)}
@@ -365,6 +374,11 @@ export default function ResultsPage() {
 function getEligibilityRank(value: string) {
   const idx = eligibilityFilterOptions.indexOf(value);
   return idx === -1 ? eligibilityFilterOptions.length : idx;
+}
+
+function getEligibilityRowTone(value: string | null | undefined) {
+  if (!value) return { base: "bg-white", hover: "hover:bg-white" };
+  return eligibilityRowTone[value] ?? { base: "bg-white", hover: "hover:bg-white" };
 }
 
 function parseDateValue(val: any) {

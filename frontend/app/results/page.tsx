@@ -784,15 +784,17 @@ function parseCurrencyInput(value: string) {
 function parseFundingRangeMax(value: any) {
   const text = normalizeText(value).toLowerCase();
   if (!text) return null;
-  const matches = [...text.matchAll(/(\d+(?:\.\d+)?)(\s*[km])?/g)];
-  if (matches.length === 0) return null;
-  const amounts = matches.map((match) => {
+  const regex = /(\d+(?:\.\d+)?)(\s*[km])?/g;
+  const amounts: number[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) {
     let amount = Number.parseFloat(match[1]);
     const suffix = match[2]?.trim();
     if (suffix === "k") amount *= 1000;
     if (suffix === "m") amount *= 1000000;
-    return amount;
-  });
+    if (Number.isFinite(amount)) amounts.push(amount);
+  }
+  if (amounts.length === 0) return null;
   const maxAmount = Math.max(...amounts);
   return Number.isFinite(maxAmount) ? maxAmount : null;
 }

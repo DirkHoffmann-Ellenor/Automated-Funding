@@ -1,7 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../components/ui/card";
@@ -31,13 +31,6 @@ const eligibilityTone: Record<string, "accent" | "muted" | "outline"> = {
   "Not Eligible": "outline",
 };
 
-const eligibilityRowTone: Record<string, { base: string; hover: string }> = {
-  "Highly Eligible": { base: "bg-emerald-200", hover: "hover:bg-emerald-300" },
-  Eligible: { base: "bg-green-200", hover: "hover:bg-green-300" },
-  "Possibly Eligible": { base: "bg-amber-200", hover: "hover:bg-amber-300" },
-  "Low Match": { base: "bg-orange-200", hover: "hover:bg-orange-300" },
-  "Not Eligible": { base: "bg-rose-200", hover: "hover:bg-rose-300" },
-};
 
 const detailFields = [
   { accessor: "applicant_types", label: "Applicant types" },
@@ -49,14 +42,75 @@ const detailFields = [
   { accessor: "deadline", label: "Deadline" },
   { accessor: "notes", label: "Notes" },
   { accessor: "eligibility", label: "Eligibility" },
+  { accessor: "eligibility_reason", label: "Eligibility reason" },
   { accessor: "evidence", label: "Evidence" },
   { accessor: "pages_scraped", label: "Pages scraped" },
-  { accessor: "visited_urls_count", label: "Visited URLs" },
+  { accessor: "visited_urls_count", label: "Visited URLs count" },
   { accessor: "extraction_timestamp", label: "Extraction timestamp" },
   { accessor: "error", label: "Error" },
+  { accessor: "source_folder", label: "Source folder" },
+  { accessor: "Processed", label: "Processed" },
 ];
 
 const eligibilityFilterOptions = ["Highly Eligible", "Eligible", "Possibly Eligible", "Low Match", "Not Eligible"];
+
+const columnFilterConfig = [
+  {
+    key: "fund",
+    label: "Fund name / URL",
+    accessors: ["fund_name", "fund_url"],
+    placeholder: "e.g. climate, foundation",
+  },
+  {
+    key: "applicantTypes",
+    label: "Applicant types",
+    accessors: ["applicant_types"],
+    placeholder: "e.g. nonprofit, charity",
+  },
+  {
+    key: "geographicScope",
+    label: "Geographic scope",
+    accessors: ["geographic_scope"],
+    placeholder: "e.g. UK, EU",
+  },
+  {
+    key: "beneficiaryFocus",
+    label: "Beneficiary focus",
+    accessors: ["beneficiary_focus"],
+    placeholder: "e.g. youth, health",
+  },
+  {
+    key: "restrictions",
+    label: "Restrictions",
+    accessors: ["restrictions"],
+    placeholder: "e.g. match funding",
+  },
+  {
+    key: "applicationStatus",
+    label: "Status",
+    accessors: ["application_status"],
+    placeholder: "e.g. open, rolling",
+  },
+  {
+    key: "notes",
+    label: "Notes",
+    accessors: ["notes"],
+    placeholder: "keywords in notes",
+  },
+] as const;
+
+type ColumnFilterKey = (typeof columnFilterConfig)[number]["key"];
+type ColumnFilters = Record<ColumnFilterKey, string>;
+
+const defaultColumnFilters: ColumnFilters = {
+  fund: "",
+  applicantTypes: "",
+  geographicScope: "",
+  beneficiaryFocus: "",
+  restrictions: "",
+  applicationStatus: "",
+  notes: "",
+};
 
 const sortOptions: { value: SortMode; label: string }[] = [
   { value: "recent", label: "Most recent" },
@@ -69,7 +123,13 @@ type ResultsCache = {
   eligibilityFilter: string[];
   sortMode: SortMode;
   search: string;
-  pinnedResult: ResultRecord | null;
+  columnFilters: ColumnFilters;
+  onlyFutureDeadlines: boolean;
+  onlyNonprofits: boolean;
+  minFunding: string;
+  fundingKeywords: string;
+  showEvidence: boolean;
+  pinnedRowKey: string | null;
 };
 
 const RESULTS_CACHE_KEY = "results_cache_v1";
@@ -82,12 +142,20 @@ export default function ResultsPage() {
   const [eligibilityFilter, setEligibilityFilter] = useState<string[]>([]);
   const [sortMode, setSortMode] = useState<SortMode>("recent");
   const [search, setSearch] = useState("");
-  const [hoveredResult, setHoveredResult] = useState<ResultRecord | null>(null);
-  const [pinnedResult, setPinnedResult] = useState<ResultRecord | null>(null);
+  const [columnFilters, setColumnFilters] = useState<ColumnFilters>(defaultColumnFilters);
+  const [onlyFutureDeadlines, setOnlyFutureDeadlines] = useState(false);
+  const [onlyNonprofits, setOnlyNonprofits] = useState(false);
+  const [minFunding, setMinFunding] = useState("");
+  const [fundingKeywords, setFundingKeywords] = useState("");
+  const [showEvidence, setShowEvidence] = useState(true);
+  const [selectedRowKey, setSelectedRowKey] = useState<string | null>(null);
+  const [expandedRows, setExpandedRows] = useState<Set<string>>(() => new Set());
+  const [pinnedRowKey, setPinnedRowKey] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [hydratedCache, setHydratedCache] = useState(false);
   const [hasCachedData, setHasCachedData] = useState(false);
   const [shouldForceRefresh, setShouldForceRefresh] = useState(false);
+  const searchRef = useRef<HTMLInputElement>(null);
 
   const fetchLatest = useCallback(
     async (opts?: { showLoading?: boolean }) => {
@@ -115,6 +183,7 @@ export default function ResultsPage() {
   useEffect(() => {
     const cached = readCache<ResultsCache>(RESULTS_CACHE_KEY)?.value;
     if (cached) {
+      const legacyPinned = (cached as { pinnedResult?: ResultRecord | null }).pinnedResult;
       setData(cached.data || []);
       setEligibilityFilter(
         cached.eligibilityFilter && cached.eligibilityFilter.length > 0
@@ -123,7 +192,13 @@ export default function ResultsPage() {
       );
       setSortMode(cached.sortMode || "recent");
       setSearch(cached.search || "");
-      setPinnedResult(cached.pinnedResult || null);
+      setColumnFilters({ ...defaultColumnFilters, ...(cached.columnFilters || {}) });
+      setOnlyFutureDeadlines(Boolean(cached.onlyFutureDeadlines));
+      setOnlyNonprofits(Boolean(cached.onlyNonprofits));
+      setMinFunding(cached.minFunding || "");
+      setFundingKeywords(cached.fundingKeywords || "");
+      setShowEvidence(cached.showEvidence ?? true);
+      setPinnedRowKey(cached.pinnedRowKey || legacyPinned?.fund_url || null);
       setHasCachedData(Boolean(cached.data && cached.data.length));
       setLoading(false);
     } else {
@@ -151,19 +226,60 @@ export default function ResultsPage() {
       eligibilityFilter,
       sortMode,
       search,
-      pinnedResult,
+      columnFilters,
+      onlyFutureDeadlines,
+      onlyNonprofits,
+      minFunding,
+      fundingKeywords,
+      showEvidence,
+      pinnedRowKey,
     };
     writeCache(RESULTS_CACHE_KEY, payload);
-  }, [data, eligibilityFilter, sortMode, search, pinnedResult, hydratedCache]);
+  }, [
+    data,
+    eligibilityFilter,
+    sortMode,
+    search,
+    columnFilters,
+    onlyFutureDeadlines,
+    onlyNonprofits,
+    minFunding,
+    fundingKeywords,
+    showEvidence,
+    pinnedRowKey,
+    hydratedCache,
+  ]);
 
   const visibleResults = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    const fundingQuery = fundingKeywords.trim().toLowerCase();
+    const minFundingValue = parseCurrencyInput(minFunding);
+    const now = Date.now();
+
     const filtered = data.filter((row) => {
       const elig = row.eligibility || "";
       const inFilter = eligibilityFilter.length === 0 || eligibilityFilter.includes(elig);
-      const query = search.toLowerCase();
-      const matchesQuery =
-        !query || Object.values(row).some((val) => (val || "").toString().toLowerCase().includes(query));
-      return inFilter && matchesQuery;
+      if (!inFilter) return false;
+
+      if (query && !matchesGlobalSearch(row, query)) return false;
+      if (!matchesColumnFilters(row, columnFilters)) return false;
+
+      if (onlyFutureDeadlines && !isFutureDeadline(row.deadline, now)) return false;
+      if (onlyNonprofits && !matchesNonprofit(row.applicant_types)) return false;
+
+      if (minFundingValue !== null) {
+        const maxFunding = parseFundingRangeMax(row.funding_range);
+        if (maxFunding === null || maxFunding < minFundingValue) return false;
+      }
+
+      if (fundingQuery) {
+        const fundingText = [row.funding_range, row.notes, row.restrictions]
+          .map((val) => normalizeText(val).toLowerCase())
+          .join(" ");
+        if (!fundingText.includes(fundingQuery)) return false;
+      }
+
+      return true;
     });
 
     const sorted = [...filtered].sort((a, b) => {
@@ -181,192 +297,413 @@ export default function ResultsPage() {
     });
 
     return sorted;
-  }, [data, eligibilityFilter, search, sortMode]);
+  }, [
+    data,
+    eligibilityFilter,
+    search,
+    sortMode,
+    columnFilters,
+    onlyFutureDeadlines,
+    onlyNonprofits,
+    minFunding,
+    fundingKeywords,
+  ]);
 
-  const activeResult = pinnedResult || hoveredResult || (visibleResults.length > 0 ? visibleResults[0] : null);
+  const detailFieldList = useMemo(
+    () => (showEvidence ? detailFields : detailFields.filter((field) => field.accessor !== "evidence")),
+    [showEvidence],
+  );
 
-  const clearPin = () => setPinnedResult(null);
+  const selectedIndex = useMemo(() => {
+    if (visibleResults.length === 0) return -1;
+    if (!selectedRowKey) return 0;
+    const idx = visibleResults.findIndex((row, index) => getRowKey(row, index) === selectedRowKey);
+    return idx === -1 ? 0 : idx;
+  }, [visibleResults, selectedRowKey]);
+
+  useEffect(() => {
+    if (visibleResults.length === 0) {
+      if (selectedRowKey !== null) setSelectedRowKey(null);
+      return;
+    }
+    const idx = visibleResults.findIndex((row, index) => getRowKey(row, index) === selectedRowKey);
+    if (idx === -1) {
+      setSelectedRowKey(getRowKey(visibleResults[0], 0));
+    }
+  }, [visibleResults, selectedRowKey]);
+
+  useEffect(() => {
+    if (!pinnedRowKey) return;
+    const exists = data.some((row, index) => getRowKey(row, index) === pinnedRowKey);
+    if (!exists) setPinnedRowKey(null);
+  }, [data, pinnedRowKey]);
+
+  const toggleExpandedRow = useCallback(
+    (rowKey: string) => {
+      setExpandedRows((prev) => {
+        const next = new Set(prev);
+        if (pinnedRowKey === rowKey) {
+          next.delete(rowKey);
+          return next;
+        }
+        if (next.has(rowKey)) {
+          next.delete(rowKey);
+        } else {
+          next.add(rowKey);
+        }
+        return next;
+      });
+      if (pinnedRowKey === rowKey) {
+        setPinnedRowKey(null);
+      }
+    },
+    [pinnedRowKey],
+  );
+
+  const togglePinnedRow = useCallback(
+    (rowKey: string) => {
+      setPinnedRowKey((prev) => (prev === rowKey ? null : rowKey));
+      setExpandedRows((prev) => {
+        const next = new Set(prev);
+        if (pinnedRowKey === rowKey) {
+          next.delete(rowKey);
+        } else {
+          next.add(rowKey);
+        }
+        return next;
+      });
+      setSelectedRowKey(rowKey);
+    },
+    [pinnedRowKey],
+  );
+
+  const handleDownload = useCallback(() => {
+    if (visibleResults.length === 0) return;
+    const csv = buildCsv(visibleResults, exportColumns);
+    downloadCsv(csv, `funding-results-${new Date().toISOString().slice(0, 10)}.csv`);
+  }, [visibleResults]);
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (isTextInput(event.target)) return;
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        if (visibleResults.length === 0) return;
+        const nextIndex = Math.min(selectedIndex + 1, visibleResults.length - 1);
+        setSelectedRowKey(getRowKey(visibleResults[nextIndex], nextIndex));
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        if (visibleResults.length === 0) return;
+        const nextIndex = Math.max(selectedIndex - 1, 0);
+        setSelectedRowKey(getRowKey(visibleResults[nextIndex], nextIndex));
+        return;
+      }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        if (selectedIndex === -1) return;
+        const row = visibleResults[selectedIndex];
+        if (!row) return;
+        togglePinnedRow(getRowKey(row, selectedIndex));
+        return;
+      }
+      if (event.key === "f" || event.key === "F") {
+        event.preventDefault();
+        searchRef.current?.focus();
+        return;
+      }
+      if (event.key === "e" || event.key === "E") {
+        event.preventDefault();
+        setShowEvidence((prev) => !prev);
+      }
+    };
+
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [selectedIndex, togglePinnedRow, visibleResults]);
 
   return (
     <div className="space-y-6">
       <header className="space-y-1">
         <p className="text-sm uppercase tracking-wide text-neutral-500">Results</p>
         <h1 className="text-3xl font-bold text-neutral-950">LLM extractions & evidence</h1>
-        <p className="text-sm text-neutral-600">Hover or click a row to inspect the full scraped details.</p>
+        <p className="text-sm text-neutral-600">
+          Use column filters, expand rows for full details, and download the filtered view.
+        </p>
       </header>
 
-      <div className="grid gap-4 lg:grid-cols-[2fr,1fr] items-start">
-        <Card className="overflow-hidden">
-          <div className="h-1 bg-gradient-to-r from-neutral-900 via-orange-500 to-neutral-900" />
-          <CardHeader className="pb-4">
-            <CardTitle className="flex items-center justify-between gap-3">
-              <span>Funding results</span>
-              <div className="flex items-center gap-2">
-                <Button variant="outline" size="sm" onClick={() => fetchLatest({ showLoading: true })} disabled={refreshing}>
-                  {refreshing ? "Refreshing..." : "Refresh"}
-                </Button>
-                {!loading && <Badge variant="outline">{visibleResults.length} shown</Badge>}
-              </div>
-            </CardTitle>
-            <CardDescription>Filter by eligibility, search text, and sort alphabetically or by recency before diving in.</CardDescription>
-            {refreshing && <p className="text-xs text-neutral-500">Refreshing latest data...</p>}
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex flex-col gap-3">
-              <div className="space-y-2">
-                <p className="text-xs uppercase tracking-wide text-neutral-600">Eligibility</p>
-                <div className="flex flex-wrap gap-2">
-                  {eligibilityFilterOptions.map((opt) => {
-                    const active = eligibilityFilter.includes(opt);
-                    return (
-                      <label
-                        key={opt}
-                        className={`flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide transition ${
-                          active
-                            ? "border-neutral-900 bg-neutral-900 text-white"
-                            : "border-neutral-200 bg-white text-neutral-700 hover:border-neutral-900"
-                        }`}
-                      >
-                        <Checkbox
-                          checked={active}
-                          onChange={(e) =>
-                            setEligibilityFilter((prev) =>
-                              e.target.checked ? [...prev, opt] : prev.filter((v) => v !== opt),
-                            )
-                          }
-                        />
-                        {opt}
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-                <div className="w-full max-w-xs space-y-1">
-                  <Label htmlFor="result-sort" className="text-xs uppercase tracking-wide text-neutral-600">
-                    Sort by
-                  </Label>
-                  <select
-                    id="result-sort"
-                    value={sortMode}
-                    onChange={(e) => setSortMode(e.target.value as SortMode)}
-                    className="h-10 w-full rounded-md border border-neutral-300 bg-white px-3 text-sm shadow-sm outline-none transition focus:border-neutral-900 focus:ring-2 focus:ring-neutral-900/10"
-                  >
-                    {sortOptions.map((opt) => (
-                      <option key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div className="w-full max-w-sm space-y-1">
-                  <Label htmlFor="result-search" className="text-xs uppercase tracking-wide text-neutral-600">
-                    Search
-                  </Label>
-                  <Input
-                    id="result-search"
-                    placeholder="Search URL, fund name, notes..."
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                  />
-                </div>
+      <Card className="overflow-hidden">
+        <div className="h-1 bg-gradient-to-r from-neutral-900 via-orange-500 to-neutral-900" />
+        <CardHeader className="pb-4">
+          <CardTitle className="flex flex-wrap items-center justify-between gap-3">
+            <span>Funding results</span>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button variant="outline" size="sm" onClick={() => fetchLatest({ showLoading: true })} disabled={refreshing}>
+                {refreshing ? "Refreshing..." : "Refresh"}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleDownload}
+                disabled={visibleResults.length === 0}
+              >
+                Download filtered
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => setShowEvidence((prev) => !prev)}>
+                {showEvidence ? "Hide evidence" : "Show evidence"}
+              </Button>
+              {!loading && <Badge variant="outline">{visibleResults.length} shown</Badge>}
+            </div>
+          </CardTitle>
+          <CardDescription>
+            Column filters, funding thresholds, and expandable rows replace the old detail panel.
+          </CardDescription>
+          {refreshing && <p className="text-xs text-neutral-500">Refreshing latest data...</p>}
+        </CardHeader>
+        <CardContent className="space-y-5">
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <p className="text-xs uppercase tracking-wide text-neutral-600">Eligibility</p>
+              <div className="flex flex-wrap gap-2">
+                {eligibilityFilterOptions.map((opt) => {
+                  const active = eligibilityFilter.includes(opt);
+                  return (
+                    <label
+                      key={opt}
+                      className={`flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide transition ${
+                        active
+                          ? "border-neutral-900 bg-neutral-900 text-white"
+                          : "border-neutral-200 bg-white text-neutral-700 hover:border-neutral-900"
+                      }`}
+                    >
+                      <Checkbox
+                        checked={active}
+                        onChange={(e) =>
+                          setEligibilityFilter((prev) =>
+                            e.target.checked ? [...prev, opt] : prev.filter((v) => v !== opt),
+                          )
+                        }
+                      />
+                      {opt}
+                    </label>
+                  );
+                })}
               </div>
             </div>
 
-            {loading && <p className="text-sm text-neutral-600">Loading results...</p>}
-            {error && <p className="text-sm text-red-600">{error}</p>}
+            <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+              <div className="w-full max-w-xs space-y-1">
+                <Label htmlFor="result-sort" className="text-xs uppercase tracking-wide text-neutral-600">
+                  Sort by
+                </Label>
+                <select
+                  id="result-sort"
+                  value={sortMode}
+                  onChange={(e) => setSortMode(e.target.value as SortMode)}
+                  className="h-10 w-full rounded-md border border-neutral-300 bg-white px-3 text-sm shadow-sm outline-none transition focus:border-neutral-900 focus:ring-2 focus:ring-neutral-900/10"
+                >
+                  {sortOptions.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="w-full max-w-sm space-y-1">
+                <Label htmlFor="result-search" className="text-xs uppercase tracking-wide text-neutral-600">
+                  Search
+                </Label>
+                <Input
+                  id="result-search"
+                  placeholder="Search all columns..."
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  ref={searchRef}
+                />
+              </div>
+            </div>
 
-            {!loading && !error && (
-              <Table>
-                <TableHeader>
-                  <TableRow className="bg-neutral-50">
-                    {tableColumns.map((col) => (
-                      <TableHead key={col.accessor}>{col.label}</TableHead>
-                    ))}
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {visibleResults.map((row, idx) => {
-                    const isActive = activeResult?.fund_url === row.fund_url;
-                    const isPinned = pinnedResult?.fund_url === row.fund_url;
-                    const tone = getEligibilityRowTone(row.eligibility);
-                    return (
+            <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
+              <label className="flex items-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-700">
+                <Checkbox checked={onlyFutureDeadlines} onChange={(e) => setOnlyFutureDeadlines(e.target.checked)} />
+                Future deadlines only
+              </label>
+              <label className="flex items-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-700">
+                <Checkbox checked={onlyNonprofits} onChange={(e) => setOnlyNonprofits(e.target.checked)} />
+                Nonprofits OK
+              </label>
+              <div className="space-y-1">
+                <Label htmlFor="min-funding" className="text-xs uppercase tracking-wide text-neutral-600">
+                  Min funding
+                </Label>
+                <Input
+                  id="min-funding"
+                  placeholder="e.g. 50000 or 50k"
+                  value={minFunding}
+                  onChange={(e) => setMinFunding(e.target.value)}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="funding-keywords" className="text-xs uppercase tracking-wide text-neutral-600">
+                  Funding keywords
+                </Label>
+                <Input
+                  id="funding-keywords"
+                  placeholder="e.g. capital, equipment"
+                  value={fundingKeywords}
+                  onChange={(e) => setFundingKeywords(e.target.value)}
+                />
+              </div>
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+              {columnFilterConfig.map((filter) => (
+                <div key={filter.key} className="space-y-1">
+                  <Label htmlFor={`filter-${filter.key}`} className="text-xs uppercase tracking-wide text-neutral-600">
+                    {filter.label}
+                  </Label>
+                  <Input
+                    id={`filter-${filter.key}`}
+                    placeholder={filter.placeholder}
+                    value={columnFilters[filter.key]}
+                    onChange={(e) =>
+                      setColumnFilters((prev) => ({
+                        ...prev,
+                        [filter.key]: e.target.value,
+                      }))
+                    }
+                  />
+                </div>
+              ))}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-500">
+              <span className="font-semibold text-neutral-700">Shortcuts</span>
+              <span>Up/Down move</span>
+              <span>Enter pin</span>
+              <span>F search</span>
+              <span>E evidence</span>
+            </div>
+          </div>
+
+          {loading && <p className="text-sm text-neutral-600">Loading results...</p>}
+          {error && <p className="text-sm text-red-600">{error}</p>}
+
+          {!loading && !error && (
+            <Table>
+              <TableHeader>
+                <TableRow className="bg-neutral-50">
+                  <TableHead className="w-12">Details</TableHead>
+                  {tableColumns.map((col) => (
+                    <TableHead key={col.accessor}>{col.label}</TableHead>
+                  ))}
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {visibleResults.map((row, idx) => {
+                  const rowKey = getRowKey(row, idx);
+                  const isSelected = selectedRowKey === rowKey;
+                  const isPinned = pinnedRowKey === rowKey;
+                  const isExpanded = expandedRows.has(rowKey) || isPinned;
+                  return (
+                    <Fragment key={`${rowKey}-${idx}`}>
                       <TableRow
-                        key={`${row.fund_url || "row"}-${idx}`}
-                        className={`${tone.base} ${tone.hover} ${isActive ? "ring-1 ring-neutral-900/30" : ""} ${
-                          isPinned ? "ring-2 ring-orange-400/70" : ""
+                        className={`${isSelected ? "ring-1 ring-neutral-900/30 ring-inset" : ""} ${
+                          isPinned ? "ring-2 ring-orange-400/70 ring-inset" : ""
                         }`}
-                        onMouseEnter={() => setHoveredResult(row)}
-                        onMouseLeave={() => setHoveredResult(null)}
-                        onClick={() => setPinnedResult(isPinned ? null : row)}
-                        title="Hover to preview; click to pin details"
+                        onClick={() => setSelectedRowKey(rowKey)}
                       >
+                        <TableCell className="w-12">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 border border-neutral-200 bg-white text-xs font-semibold text-neutral-700 hover:border-neutral-900"
+                            aria-expanded={isExpanded}
+                            title={isExpanded ? "Collapse details" : "Expand details"}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              toggleExpandedRow(rowKey);
+                            }}
+                          >
+                            {isExpanded ? "v" : ">"}
+                          </Button>
+                        </TableCell>
                         {tableColumns.map((col) => (
                           <TableCell key={col.accessor}>
                             {col.render ? col.render(row) : row[col.accessor] ?? "-"}
                           </TableCell>
                         ))}
                       </TableRow>
-                    );
-                  })}
-                </TableBody>
-                {visibleResults.length === 0 && <TableCaption>No results match your filters yet.</TableCaption>}
-              </Table>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card className="self-start sticky top-4 lg:max-h-[calc(100vh-2rem)]">
-          <CardHeader className="pb-3">
-            <CardTitle>Details</CardTitle>
-            <CardDescription>
-              Hover a row for a quick preview or click to pin. All fields below come directly from the results sheet.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3 max-h-[calc(100vh-7rem)] overflow-y-auto pr-1 lg:pr-2">
-            {!activeResult && <p className="text-sm text-neutral-600">No row selected yet.</p>}
-            {activeResult && (
-              <>
-                <div className="flex items-start justify-between gap-3">
-                  <div className="space-y-1">
-                    <p className="text-xs uppercase tracking-wide text-neutral-500">Fund</p>
-                    <p className="text-base font-semibold text-neutral-900">{activeResult.fund_name || "Unnamed fund"}</p>
-                    <a
-                      href={activeResult.fund_url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="block text-xs text-neutral-600 underline decoration-neutral-300 underline-offset-4 hover:text-neutral-900"
-                    >
-                      {activeResult.fund_url}
-                    </a>
-                  </div>
-                  <div className="flex flex-col items-end gap-2">
-                    <Badge variant={eligibilityTone[activeResult.eligibility] || "outline"}>
-                      {activeResult.eligibility || "Unknown"}
-                    </Badge>
-                    {pinnedResult && (
-                      <button className="text-xs text-neutral-500 underline" onClick={clearPin}>
-                        Clear pin
-                      </button>
-                    )}
-                  </div>
-                </div>
-                <div className="grid gap-3">
-                  {detailFields.map((field) => (
-                    <div key={field.accessor} className="rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2">
-                      <p className="text-[11px] uppercase tracking-wide text-neutral-500">{field.label}</p>
-                      <p className="text-sm text-neutral-900">
-                        {formatValue(activeResult[field.accessor as keyof ResultRecord])}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              </>
-            )}
-          </CardContent>
-        </Card>
-      </div>
+                      {isExpanded && (
+                        <TableRow className="bg-white">
+                          <TableCell colSpan={tableColumns.length + 1} className="bg-white">
+                            <div className="rounded-xl border border-neutral-200 bg-white p-4 shadow-sm">
+                              <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                                <div className="space-y-1">
+                                  <p className="text-xs uppercase tracking-wide text-neutral-500">Fund</p>
+                                  <p className="text-base font-semibold text-neutral-900">
+                                    {row.fund_name || "Unnamed fund"}
+                                  </p>
+                                  {row.fund_url ? (
+                                    <a
+                                      href={row.fund_url}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="block text-xs text-neutral-600 underline decoration-neutral-300 underline-offset-4 hover:text-neutral-900"
+                                    >
+                                      {row.fund_url}
+                                    </a>
+                                  ) : (
+                                    <p className="text-xs text-neutral-500">No URL provided.</p>
+                                  )}
+                                </div>
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <Badge variant={eligibilityTone[row.eligibility] || "outline"}>
+                                    {row.eligibility || "Unknown"}
+                                  </Badge>
+                                  {isPinned && <Badge variant="outline">Pinned</Badge>}
+                                  {isPinned && (
+                                    <button
+                                      className="text-xs text-neutral-500 underline"
+                                      onClick={() => togglePinnedRow(rowKey)}
+                                    >
+                                      Clear pin
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                              {!showEvidence && (
+                                <p className="text-xs text-neutral-500">Evidence hidden. Press E to show it.</p>
+                              )}
+                              <div className="grid gap-3 md:grid-cols-2">
+                                {detailFieldList.map((field) => (
+                                  <div
+                                    key={field.accessor}
+                                    className="rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2"
+                                  >
+                                    <p className="text-[11px] uppercase tracking-wide text-neutral-500">{field.label}</p>
+                                    <p className="text-sm text-neutral-900">
+                                      {formatValue(row[field.accessor as keyof ResultRecord])}
+                                    </p>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </Fragment>
+                  );
+                })}
+              </TableBody>
+              {visibleResults.length === 0 && <TableCaption>No results match your filters yet.</TableCaption>}
+            </Table>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }
@@ -374,11 +711,6 @@ export default function ResultsPage() {
 function getEligibilityRank(value: string) {
   const idx = eligibilityFilterOptions.indexOf(value);
   return idx === -1 ? eligibilityFilterOptions.length : idx;
-}
-
-function getEligibilityRowTone(value: string | null | undefined) {
-  if (!value) return { base: "bg-white", hover: "hover:bg-white" };
-  return eligibilityRowTone[value] ?? { base: "bg-white", hover: "hover:bg-white" };
 }
 
 function parseDateValue(val: any) {
@@ -401,6 +733,142 @@ function formatValue(val: any) {
   return Array.isArray(val) ? val.join(", ") : String(val);
 }
 
+function normalizeText(val: any) {
+  if (val === null || val === undefined) return "";
+  if (Array.isArray(val)) return val.join(" ");
+  return String(val);
+}
+
+function matchesGlobalSearch(row: ResultRecord, query: string) {
+  if (!query) return true;
+  return Object.values(row).some((val) => normalizeText(val).toLowerCase().includes(query));
+}
+
+function matchesColumnFilters(row: ResultRecord, filters: ColumnFilters) {
+  return columnFilterConfig.every((filter) => {
+    const query = filters[filter.key]?.trim().toLowerCase();
+    if (!query) return true;
+    return filter.accessors.some((accessor) => normalizeText(row[accessor]).toLowerCase().includes(query));
+  });
+}
+
+const nonprofitKeywords = [
+  "nonprofit",
+  "non-profit",
+  "non profit",
+  "charity",
+  "charitable",
+  "not-for-profit",
+  "not for profit",
+  "ngo",
+];
+
+function matchesNonprofit(value: any) {
+  const text = normalizeText(value).toLowerCase();
+  if (!text) return false;
+  return nonprofitKeywords.some((keyword) => text.includes(keyword));
+}
+
+function parseCurrencyInput(value: string) {
+  if (!value) return null;
+  const cleaned = value.replace(/,/g, "").trim().toLowerCase();
+  const match = cleaned.match(/(\d+(?:\.\d+)?)(\s*[km])?/);
+  if (!match) return null;
+  let amount = Number.parseFloat(match[1]);
+  const suffix = match[2]?.trim();
+  if (suffix === "k") amount *= 1000;
+  if (suffix === "m") amount *= 1000000;
+  return Number.isNaN(amount) ? null : amount;
+}
+
+function parseFundingRangeMax(value: any) {
+  const text = normalizeText(value).toLowerCase();
+  if (!text) return null;
+  const matches = [...text.matchAll(/(\d+(?:\.\d+)?)(\s*[km])?/g)];
+  if (matches.length === 0) return null;
+  const amounts = matches.map((match) => {
+    let amount = Number.parseFloat(match[1]);
+    const suffix = match[2]?.trim();
+    if (suffix === "k") amount *= 1000;
+    if (suffix === "m") amount *= 1000000;
+    return amount;
+  });
+  const maxAmount = Math.max(...amounts);
+  return Number.isFinite(maxAmount) ? maxAmount : null;
+}
+
+function isFutureDeadline(value: any, now: number) {
+  if (!value) return false;
+  const text = normalizeText(value).toLowerCase();
+  if (text.includes("rolling") || text.includes("ongoing") || text.includes("open")) {
+    return true;
+  }
+  const timestamp = parseDateValue(value);
+  return timestamp !== null && timestamp >= now;
+}
+
+function getRowKey(row: ResultRecord, idx: number) {
+  return row.fund_url || row.fund_name || row.source_folder || row.extraction_timestamp || `row-${idx}`;
+}
+
+function isTextInput(target: EventTarget | null) {
+  if (!target) return false;
+  const element = target as HTMLElement;
+  if (element.isContentEditable) return true;
+  return Boolean(element.closest("input, textarea, select, button, a"));
+}
+
+const exportColumns = [
+  { accessor: "fund_url", label: "fund_url" },
+  { accessor: "fund_name", label: "fund_name" },
+  { accessor: "applicant_types", label: "applicant_types" },
+  { accessor: "geographic_scope", label: "geographic_scope" },
+  { accessor: "beneficiary_focus", label: "beneficiary_focus" },
+  { accessor: "funding_range", label: "funding_range" },
+  { accessor: "restrictions", label: "restrictions" },
+  { accessor: "application_status", label: "application_status" },
+  { accessor: "deadline", label: "deadline" },
+  { accessor: "notes", label: "notes" },
+  { accessor: "eligibility", label: "eligibility" },
+  { accessor: "evidence", label: "evidence" },
+  { accessor: "pages_scraped", label: "pages_scraped" },
+  { accessor: "visited_urls_count", label: "visited_urls_count" },
+  { accessor: "extraction_timestamp", label: "extraction_timestamp" },
+  { accessor: "error", label: "error" },
+  { accessor: "source_folder", label: "source_folder" },
+  { accessor: "Processed", label: "Processed" },
+];
+
+function formatCsvValue(value: any) {
+  if (value === null || value === undefined) return "";
+  return Array.isArray(value) ? value.join(", ") : String(value);
+}
+
+function escapeCsvValue(value: string) {
+  const escaped = value.replace(/"/g, '""');
+  return /[",\n]/.test(escaped) ? `"${escaped}"` : escaped;
+}
+
+function buildCsv(rows: ResultRecord[], columns: { accessor: string; label: string }[]) {
+  const header = columns.map((col) => escapeCsvValue(col.label)).join(",");
+  const lines = rows.map((row) =>
+    columns.map((col) => escapeCsvValue(formatCsvValue(row[col.accessor]))).join(","),
+  );
+  return [header, ...lines].join("\r\n");
+}
+
+function downloadCsv(csv: string, filename: string) {
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
 const tableColumns: {
   accessor: string;
   label: string;
@@ -410,58 +878,85 @@ const tableColumns: {
     accessor: "fund_name",
     label: "Fund",
     render: (row: ResultRecord) => (
-      <div className="space-y-1">
-        <p className="text-sm font-semibold text-neutral-900">{row.fund_name || "Unnamed fund"}</p>
-        <a
-          href={row.fund_url}
-          target="_blank"
-          rel="noreferrer"
-          className="text-xs text-neutral-600 underline decoration-neutral-300 underline-offset-4 hover:text-neutral-900"
-        >
-          {row.fund_url}
-        </a>
-        {row.notes && <p className="text-xs text-neutral-600">{row.notes}</p>}
+      <div className="space-y-1 min-w-0 min-h-[4.5rem]">
+        <div className="flex items-center gap-2 min-w-0">
+          <p className="min-w-0 text-sm font-semibold text-neutral-900 truncate">
+            {row.fund_name || "Unnamed fund"}
+          </p>
+          <Badge
+            variant={eligibilityTone[row.eligibility] || "outline"}
+            className="shrink-0 whitespace-nowrap"
+          >
+            {row.eligibility || "Unknown"}
+          </Badge>
+        </div>
+        {row.fund_url ? (
+          <a
+            href={row.fund_url}
+            target="_blank"
+            rel="noreferrer"
+            className="block min-w-0 truncate text-xs text-neutral-600 underline decoration-neutral-300 underline-offset-4 hover:text-neutral-900"
+          >
+            {row.fund_url}
+          </a>
+        ) : (
+          <p className="text-xs text-neutral-500">No URL provided.</p>
+        )}
+        {row.notes && <p className="text-xs text-neutral-600 truncate">{row.notes}</p>}
       </div>
     ),
   },
   {
-    accessor: "eligibility",
-    label: "Eligibility",
+    accessor: "applicant_types",
+    label: "Audience & scope",
     render: (row: ResultRecord) => (
-      <Badge variant={eligibilityTone[row.eligibility] || "outline"} className="whitespace-nowrap">
-        {row.eligibility || "Unknown"}
-      </Badge>
-    ),
-  },
-  {
-    accessor: "application_status",
-    label: "Status",
-    render: (row: ResultRecord) => (
-      <div className="space-y-1">
-        <Badge variant="muted" className="w-fit">
-          {row.application_status || "Not stated"}
-        </Badge>
-        <p className="text-xs text-neutral-600">Deadline: {row.deadline || "Not listed"}</p>
+      <div className="space-y-1 text-xs text-neutral-600 min-h-[4.5rem]">
+        <p className="truncate">
+          <span className="font-semibold text-neutral-800">Applicants:</span> {formatValue(row.applicant_types)}
+        </p>
+        <p className="truncate">
+          <span className="font-semibold text-neutral-800">Focus:</span> {formatValue(row.beneficiary_focus)}
+        </p>
+        <p className="truncate">
+          <span className="font-semibold text-neutral-800">Scope:</span> {formatValue(row.geographic_scope)}
+        </p>
       </div>
     ),
   },
   {
     accessor: "funding_range",
-    label: "Funding & notes",
+    label: "Funding",
     render: (row: ResultRecord) => (
-      <div className="space-y-1">
-        <p className="text-sm font-semibold text-neutral-900">{row.funding_range || "Range not provided"}</p>
-        {row.eligibility_reason && <p className="text-xs text-neutral-600">Reason: {row.eligibility_reason}</p>}
+      <div className="space-y-1 min-h-[4.5rem]">
+        <p className="text-sm font-semibold text-neutral-900 truncate">
+          {row.funding_range || "Range not provided"}
+        </p>
+        {row.restrictions && (
+          <p className="text-xs text-neutral-600 truncate">Restrictions: {row.restrictions}</p>
+        )}
       </div>
     ),
   },
   {
-    accessor: "pages_scraped",
-    label: "Pages",
+    accessor: "application_status",
+    label: "Status & deadline",
     render: (row: ResultRecord) => (
-      <div className="space-y-1">
-        <p className="text-sm font-semibold text-neutral-900">{row.pages_scraped ?? "-"}</p>
-        <p className="text-xs text-neutral-600">Visited: {row.visited_urls_count ?? "-"}</p>
+      <div className="space-y-1 min-h-[4.5rem]">
+        <Badge variant="muted" className="w-fit">
+          {row.application_status || "Not stated"}
+        </Badge>
+        <p className="text-xs text-neutral-600 truncate">Deadline: {row.deadline || "Not listed"}</p>
+      </div>
+    ),
+  },
+  {
+    accessor: "source_folder",
+    label: "Source",
+    render: (row: ResultRecord) => (
+      <div className="space-y-1 min-h-[4.5rem]">
+        <p className="text-sm font-semibold text-neutral-900 truncate">{row.source_folder || "Not listed"}</p>
+        <p className="text-xs text-neutral-600 truncate">Pages: {row.pages_scraped ?? "-"}</p>
+        <p className="text-xs text-neutral-600 truncate">Visited: {row.visited_urls_count ?? "-"}</p>
       </div>
     ),
   },

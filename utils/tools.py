@@ -538,7 +538,7 @@ def _get_already_processed_urls_cached() -> Set[str]:
 
 def get_already_processed_urls(force_refresh: bool = False) -> Set[str]:
     if force_refresh:
-        _get_already_processed_urls_cached.cache_clear()
+        clear_results_cache()
     return set(_get_already_processed_urls_cached())
 
 

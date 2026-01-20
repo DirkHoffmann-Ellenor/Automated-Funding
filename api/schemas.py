@@ -27,6 +27,7 @@ class ScrapeResponse(BaseModel):
 
 class BatchScrapeRequest(BaseModel):
     fund_urls: List[HttpUrl]
+    rescrape_urls: List[HttpUrl] = Field(default_factory=list, description="Already processed URLs to re-scrape")
 
 
 class JobCreatedResponse(BaseModel):
@@ -35,6 +36,7 @@ class JobCreatedResponse(BaseModel):
     to_scrape: List[HttpUrl]
     already_processed: List[HttpUrl] = Field(default_factory=list)
     duplicates_in_payload: List[HttpUrl] = Field(default_factory=list)
+    rescrape_urls: List[HttpUrl] = Field(default_factory=list)
 
 
 class JobError(BaseModel):
@@ -68,6 +70,11 @@ class JobStatusResponse(BaseModel):
 
 class ResultsResponse(BaseModel):
     results: List[Dict[str, Any]]
+
+
+class RefreshResultsResponse(BaseModel):
+    status: str = "ok"
+    total_results: int = 0
 
 
 class PrepareUrlsRequest(BaseModel):

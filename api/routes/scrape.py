@@ -1,3 +1,5 @@
+from typing import Optional, Set
+
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from api import dependencies
@@ -17,12 +19,19 @@ from utils import tools
 router = APIRouter(prefix="/scrape", tags=["scrape"])
 
 
-def _prepare_urls_for_scrape(raw_urls: list[str], *, tools_module: tools) -> dict:
+def _prepare_urls_for_scrape(
+    raw_urls: list[str],
+    *,
+    tools_module: tools,
+    allow_rescrape: Optional[Set[str]] = None,
+) -> dict:
     """
     Normalize URLs, drop duplicates, and flag any that were already processed.
-    This prevents re-scraping the same fund URL twice.
+    Rescrape URLs can be explicitly allowed to bypass the duplicate check.
     """
     processed = tools_module.get_already_processed_urls(force_refresh=True)
+    allow_rescrape = allow_rescrape or set()
+    allow_rescrape_normalized = {tools_module.normalize_url(u) for u in allow_rescrape}
     normalized_map: dict[str, str] = {}
     already_processed: list[str] = []
     duplicates_in_payload: list[str] = []
@@ -36,7 +45,7 @@ def _prepare_urls_for_scrape(raw_urls: list[str], *, tools_module: tools) -> dic
             duplicates_in_payload.append(raw)
             continue
         seen_normalized.add(normalized)
-        if normalized in processed:
+        if normalized in processed and normalized not in allow_rescrape_normalized:
             already_processed.append(raw)
             continue
         to_scrape.append(normalized)
@@ -88,10 +97,14 @@ def scrape_batch(
     payload: BatchScrapeRequest,
     tools_module: tools = Depends(dependencies.get_tools_module),
 ) -> JobCreatedResponse:
-    if not payload.fund_urls:
+    if not payload.fund_urls and not payload.rescrape_urls:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No URLs provided")
 
-    prepared = _prepare_urls_for_scrape([str(url) for url in payload.fund_urls], tools_module=tools_module)
+    raw_urls = [str(url) for url in payload.fund_urls]
+    rescrape_urls = [str(url) for url in payload.rescrape_urls] if payload.rescrape_urls else []
+    if rescrape_urls:
+        raw_urls.extend(rescrape_urls)
+    prepared = _prepare_urls_for_scrape(raw_urls, tools_module=tools_module, allow_rescrape=set(rescrape_urls))
     if not prepared["to_scrape"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -105,6 +118,7 @@ def scrape_batch(
         to_scrape=prepared["to_scrape"],
         already_processed=prepared["already_processed"],
         duplicates_in_payload=prepared["duplicates_in_payload"],
+        rescrape_urls=payload.rescrape_urls,
     )
 
 

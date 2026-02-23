@@ -52,8 +52,6 @@ type ScrapeCache = {
   prepSummary: PrepSummary | null;
   queueStats: QueueStats;
   job: JobStatus | null;
-  rescrapeUrls: string[];
-  rescrapeSelection: string[];
 };
 
 const extractUrls = (text: string) => {
@@ -73,8 +71,6 @@ export default function ScrapeForm() {
   const [job, setJob] = useState<JobStatus | null>(null);
   const [isPreparing, setIsPreparing] = useState(false);
   const [isScraping, setIsScraping] = useState(false);
-  const [rescrapeUrls, setRescrapeUrls] = useState<string[]>([]);
-  const [rescrapeSelection, setRescrapeSelection] = useState<string[]>([]);
   const [isRefreshingSheet, setIsRefreshingSheet] = useState(false);
   const [sheetRefreshMessage, setSheetRefreshMessage] = useState<string | null>(null);
   const [sheetRefreshError, setSheetRefreshError] = useState<string | null>(null);
@@ -82,12 +78,6 @@ export default function ScrapeForm() {
   const [hydratedCache, setHydratedCache] = useState(false);
   const lastCompletedJobId = useRef<string | null>(null);
 
-  const clearManualInput = () => {
-    setManualInput("");
-    setPrepError(null);
-    setPrepSummary(null);
-    setRescrapeSelection([]);
-  };
 
   const resetAll = () => {
     setManualInput("");
@@ -96,8 +86,6 @@ export default function ScrapeForm() {
     setPrepError(null);
     setJobError(null);
     setJob(null);
-    setRescrapeUrls([]);
-    setRescrapeSelection([]);
     setSheetRefreshMessage(null);
     setSheetRefreshError(null);
     setQueueStats({ uniqueDomains: 0, totalQueued: 0 });
@@ -120,12 +108,11 @@ export default function ScrapeForm() {
     setManualInput(cached.manualInput || "");
     setStagedUrls(cached.stagedUrls || []);
     setPrepSummary(cachedSummary);
-    setRescrapeUrls(cached.rescrapeUrls || []);
-    setRescrapeSelection(cached.rescrapeSelection || []);
-    setQueueStats(cached.queueStats || calcQueueStats(cached.stagedUrls || [], []));
+    setQueueStats(cached.queueStats || calcQueueStats(cached.stagedUrls || []));
     setJob(cached.job || null);
     setHydratedCache(true);
   }, []);
+
 
   useEffect(() => {
     if (!hydratedCache) return;
@@ -135,11 +122,9 @@ export default function ScrapeForm() {
       prepSummary,
       queueStats,
       job,
-      rescrapeUrls,
-      rescrapeSelection,
     };
     writeCache(SCRAPE_CACHE_KEY, payload);
-  }, [hydratedCache, manualInput, stagedUrls, prepSummary, queueStats, job, rescrapeUrls, rescrapeSelection]);
+  }, [hydratedCache, manualInput, stagedUrls, prepSummary, queueStats, job]);
 
   useEffect(() => {
     if (!job || !job.done) return;
@@ -181,7 +166,7 @@ export default function ScrapeForm() {
             addedNow.push(u);
           }
         });
-        setQueueStats(calcQueueStats(next, []));
+        setQueueStats(calcQueueStats(next));
         return next;
       });
       setPrepSummary({
@@ -190,7 +175,6 @@ export default function ScrapeForm() {
         duplicatesInPayload: res.duplicates_in_payload || [],
         normalizedMap: res.normalized_map || {},
       });
-      setRescrapeSelection([]);
     } catch (err: any) {
       setPrepError(err.message || "Could not prepare URLs.");
     } finally {
@@ -220,48 +204,18 @@ export default function ScrapeForm() {
   const removeFromQueue = (url: string) => {
     setStagedUrls((prev) => {
       const next = prev.filter((u) => u !== url);
-      setQueueStats(calcQueueStats(next, []));
+      setQueueStats(calcQueueStats(next));
       return next;
     });
-    setRescrapeUrls((prev) => prev.filter((u) => u !== url));
   };
 
   const clearQueue = () => {
     setStagedUrls([]);
-    setRescrapeUrls([]);
-    setRescrapeSelection([]);
     setQueueStats({ uniqueDomains: 0, totalQueued: 0 });
     setPrepSummary(null);
     setPrepError(null);
   };
 
-  const handleRescrapeSelectionChange = (event: ChangeEvent<HTMLSelectElement>) => {
-    const selected = Array.from(event.target.selectedOptions).map((opt) => opt.value);
-    setRescrapeSelection(selected);
-  };
-
-  const queueRescrapeSelection = () => {
-    if (!prepSummary || rescrapeSelection.length === 0) return;
-    const normalizedSelection = rescrapeSelection
-      .map((url) => prepSummary.normalizedMap[url] || url)
-      .filter(Boolean);
-    setStagedUrls((prev) => {
-      const next = [...prev];
-      normalizedSelection.forEach((url) => {
-        if (!next.includes(url)) next.push(url);
-      });
-      setQueueStats(calcQueueStats(next, []));
-      return next;
-    });
-    setRescrapeUrls((prev) => {
-      const next = [...prev];
-      normalizedSelection.forEach((url) => {
-        if (!next.includes(url)) next.push(url);
-      });
-      return next;
-    });
-    setRescrapeSelection([]);
-  };
 
   const refreshSheetConnection = async () => {
     setIsRefreshingSheet(true);
@@ -270,6 +224,7 @@ export default function ScrapeForm() {
     try {
       const res = await api.refreshResults();
       setSheetRefreshMessage(`Sheet refreshed (${res.total_results || 0} rows).`);
+      writeCache(RESULTS_FORCE_REFRESH_KEY, { jobId: "manual-refresh", completedAt: Date.now() });
     } catch (err: any) {
       setSheetRefreshError(err.message || "Failed to refresh the sheet connection.");
     } finally {
@@ -282,12 +237,10 @@ export default function ScrapeForm() {
     setIsScraping(true);
     setJobError(null);
     try {
-      const payload = await api.scrapeBatch(stagedUrls, rescrapeUrls);
+      const payload = await api.scrapeBatch(stagedUrls);
       const status = await api.jobStatus(payload.job_id);
       setJob(status);
       setStagedUrls([]);
-      setRescrapeUrls([]);
-      setRescrapeSelection([]);
       setPrepSummary({
         added: payload.to_scrape || [],
         alreadyProcessed: payload.already_processed || [],
@@ -320,9 +273,6 @@ export default function ScrapeForm() {
           <Button variant="outline" size="sm" onClick={refreshSheetConnection} disabled={isRefreshingSheet}>
             {isRefreshingSheet ? "Refreshing sheet..." : "Refresh sheet"}
           </Button>
-          <Button variant="ghost" size="sm" onClick={clearManualInput}>
-            Clear manual text
-          </Button>
           <Button variant="outline" size="sm" onClick={resetAll}>
             Reset all fields
           </Button>
@@ -342,12 +292,9 @@ export default function ScrapeForm() {
                 </Badge>
                 <CardTitle>Paste one or many fund URLs</CardTitle>
                 <CardDescription>
-                  Enter as many URLs as you like — we will normalize and de-duplicate before scraping.
+                  Enter as many URLs as you like - we will normalize and de-duplicate before scraping.
                 </CardDescription>
               </div>
-              <Button variant="ghost" size="sm" onClick={clearManualInput}>
-                Clear
-              </Button>
             </div>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -394,11 +341,10 @@ export default function ScrapeForm() {
             <span>Funds about to scrape</span>
             <div className="flex items-center gap-2">
               <Badge variant="outline">{stagedUrls.length} queued</Badge>
-              {rescrapeUrls.length > 0 && <Badge variant="muted">{rescrapeUrls.length} rescrape</Badge>}
             </div>
           </CardTitle>
           <CardDescription>
-            URLs must pass the pre-check (no duplicates). Already-processed funds can be re-queued below for rescraping.
+            URLs must pass the pre-check (no duplicates). Already-processed funds are skipped.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -425,46 +371,9 @@ export default function ScrapeForm() {
               </div>
               {(prepSummary.alreadyProcessed.length > 0 || prepSummary.duplicatesInPayload.length > 0) && (
                 <p className="mt-2 text-xs text-neutral-600">
-                  Duplicate entries are ignored. Already-processed URLs can be queued again below if you want to re-scrape them.
+                  Duplicate entries are ignored. Already-processed URLs are skipped - use the Expired scraped tab under
+                  Results to rescrape stale funds.
                 </p>
-              )}
-              {prepSummary.alreadyProcessed.length > 0 && (
-                <div className="mt-3 space-y-2">
-                  <Label htmlFor="rescrape-select" className="text-xs uppercase tracking-wide text-neutral-600">
-                    Re-scrape already processed
-                  </Label>
-                  <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
-                    <select
-                      id="rescrape-select"
-                      multiple
-                      value={rescrapeSelection}
-                      onChange={handleRescrapeSelectionChange}
-                      className="min-h-[120px] w-full rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm shadow-sm outline-none focus:border-neutral-900 focus:ring-2 focus:ring-neutral-900/10"
-                    >
-                      {prepSummary.alreadyProcessed.map((url) => {
-                        const normalized = prepSummary.normalizedMap[url] || url;
-                        const isQueued = stagedUrls.includes(normalized);
-                        return (
-                          <option key={url} value={url} disabled={isQueued}>
-                            {url}
-                            {isQueued ? " (queued)" : ""}
-                          </option>
-                        );
-                      })}
-                    </select>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={queueRescrapeSelection}
-                      disabled={rescrapeSelection.length === 0}
-                    >
-                      Queue rescrape
-                    </Button>
-                  </div>
-                  <p className="text-xs text-neutral-600">
-                    Selected URLs will be scraped again and appended as new rows in the sheet.
-                  </p>
-                </div>
               )}
             </div>
           )}
@@ -477,7 +386,6 @@ export default function ScrapeForm() {
             ) : (
               <ul className="space-y-2">
                 {stagedUrls.map((url, idx) => {
-                  const isRescrape = rescrapeUrls.includes(url);
                   return (
                     <li
                       key={url}
@@ -487,11 +395,6 @@ export default function ScrapeForm() {
                         <p className="text-[11px] uppercase tracking-wide text-neutral-500">#{idx + 1}</p>
                         <p className="truncate text-sm font-semibold text-neutral-900">{url}</p>
                         <p className="text-xs text-neutral-600">Domain: {safeDomain(url)}</p>
-                        {isRescrape && (
-                          <Badge variant="muted" className="mt-2 w-fit">
-                            Rescrape
-                          </Badge>
-                        )}
                       </div>
                       <Button variant="ghost" size="sm" onClick={() => removeFromQueue(url)}>
                         Remove
@@ -528,6 +431,11 @@ export default function ScrapeForm() {
                 const progressValue = Math.max(0, Math.min(100, Number(job.progress_percent) || 0));
                 const totalElapsed = formatSeconds(job.total_elapsed_seconds || 0);
                 const currentElapsed = formatSeconds(job.current_elapsed_seconds || 0);
+                const latestResult = job.results[job.results.length - 1];
+                const latestLabel = latestResult?.fund_name || latestResult?.fund_url || "Latest fund";
+                const visitedUrls: string[] = Array.isArray(latestResult?.visited_urls)
+                  ? latestResult.visited_urls.filter((url: unknown): url is string => typeof url === "string")
+                  : [];
                 return (
                   <>
                     <div className="flex flex-wrap items-center justify-between gap-3">
@@ -536,7 +444,7 @@ export default function ScrapeForm() {
                           Job {job.job_id.slice(0, 8)}
                         </p>
                         <p className="text-sm font-semibold text-neutral-900">
-                          {job.done ? "Completed" : "Processing"} • {job.completed_urls || job.results.length}/
+                          {job.done ? "Completed" : "Processing"} - {job.completed_urls || job.results.length}/
                           {job.total_urls || "?"} done
                         </p>
                       </div>
@@ -586,11 +494,44 @@ export default function ScrapeForm() {
                                   </p>
                                   <p className="truncate text-xs text-neutral-500">{res.fund_url}</p>
                                 </div>
-                                <Badge variant="outline" className="whitespace-nowrap">
-                                  {res.eligibility || "Pending"}
-                                </Badge>
+                                <div className="flex items-center gap-2">
+                                  <Badge variant="outline" className="whitespace-nowrap">
+                                    {res.eligibility || "Pending"}
+                                  </Badge>
+                                  {isPdfRead(res.pdf_read) && (
+                                    <Badge variant="outline" className="whitespace-nowrap">
+                                      [x] PDF read
+                                    </Badge>
+                                  )}
+                                </div>
                               </li>
                             ))}
+                        </ul>
+                      </div>
+                    )}
+                    {visitedUrls.length > 0 && (
+                      <div className="mt-4 space-y-2">
+                        <p className="text-[11px] uppercase tracking-wide text-neutral-500">
+                          Scraped URLs (latest fund: {latestLabel})
+                        </p>
+                        <ul className="max-h-48 space-y-2 overflow-y-auto rounded-lg border border-neutral-200 bg-white px-3 py-2 text-xs text-neutral-700">
+                          {visitedUrls.map((url) => (
+                            <li key={url} className="flex items-start justify-between gap-3">
+                              <a
+                                href={url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="min-w-0 truncate text-neutral-700 underline decoration-neutral-300 underline-offset-4 hover:text-neutral-900"
+                              >
+                                {url}
+                              </a>
+                              {isPdfUrl(url) && (
+                                <Badge variant="outline" className="whitespace-nowrap">
+                                  PDF
+                                </Badge>
+                              )}
+                            </li>
+                          ))}
                         </ul>
                       </div>
                     )}
@@ -639,8 +580,17 @@ function safeDomain(url: string): string {
   }
 }
 
-function calcQueueStats(existing: string[], added: string[]): QueueStats {
-  const urls = [...existing, ...added];
+function isPdfRead(value: any) {
+  if (value === true) return true;
+  if (typeof value === "number") return value > 0;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    return ["true", "yes", "1", "y"].includes(normalized);
+  }
+  return false;
+}
+
+function calcQueueStats(urls: string[]): QueueStats {
   const domains = new Set<string>();
   urls.forEach((u) => {
     const d = safeDomain(u);
@@ -660,4 +610,9 @@ function formatSeconds(totalSeconds: number): string {
     `${seconds}s`,
   ].filter(Boolean);
   return parts.join(" ");
+}
+
+function isPdfUrl(url: string): boolean {
+  const lowered = url.toLowerCase();
+  return lowered.endsWith(".pdf") || lowered.includes("accounts-resource");
 }

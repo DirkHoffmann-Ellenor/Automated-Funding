@@ -1,11 +1,13 @@
+import io
 import json
 import logging
 import os
 import re
 import threading
 import time
+from calendar import monthrange
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -18,7 +20,6 @@ from bs4 import BeautifulSoup
 from google.oauth2.service_account import Credentials
 from openai import OpenAI
 
-from Web_scraper_2 import OUTPUT_CSV
 from utils.constants import (
     CSV_COLUMNS,
     DISCOVERY_DEPTH,
@@ -113,6 +114,54 @@ def normalize_url(url: str) -> str:
     return f"{scheme}://{netloc}{path}{qs}"
 
 
+def parse_extraction_timestamp(value: Any) -> Optional[datetime]:
+    """Parse extraction_timestamp values from Google Sheets into datetimes."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    cleaned = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(cleaned)
+        if parsed.tzinfo:
+            parsed = parsed.astimezone().replace(tzinfo=None)
+        return parsed
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    # Handle malformed timestamps like "2025-11-20 11:33:60" by rolling
+    # overflow seconds forward from the minute boundary.
+    overflow_match = re.fullmatch(r"(\d{4}-\d{2}-\d{2})[ T](\d{2}):(\d{2}):(\d+)", text)
+    if overflow_match:
+        date_part, hour_part, minute_part, second_part = overflow_match.groups()
+        try:
+            base = datetime.strptime(f"{date_part} {hour_part}:{minute_part}:00", "%Y-%m-%d %H:%M:%S")
+            return base + timedelta(seconds=int(second_part))
+        except ValueError:
+            return None
+    return None
+
+
+def subtract_months(source: datetime, months: int) -> datetime:
+    """Subtract whole calendar months from a datetime."""
+    if months <= 0:
+        return source
+    year = source.year
+    month = source.month - months
+    while month <= 0:
+        month += 12
+        year -= 1
+    day = min(source.day, monthrange(year, month)[1])
+    return source.replace(year=year, month=month, day=day)
+
+
 def initial_normalize_url(url: str) -> str:
     """
     For initial seed URLs (user-provided), produce a base link to restrict crawling.
@@ -187,6 +236,88 @@ def extract_visible_text(html: str) -> str:
         tag.decompose()
     text = " ".join(t.get_text(" ", strip=True) for t in soup.find_all(["h1", "h2", "h3", "p", "li", "td", "th"]))
     return re.sub(r"\s+", " ", text).strip()
+
+
+def is_charity_commission_url(url: str) -> bool:
+    try:
+        netloc = urlparse(url).netloc.lower()
+    except Exception:
+        return False
+    return "register-of-charities.charitycommission.gov.uk" in netloc
+
+
+def extract_charity_commission_name(html: Optional[str]) -> Optional[str]:
+    if not html:
+        return None
+    soup = BeautifulSoup(html, "html.parser")
+    h1 = soup.find("h1", class_=re.compile(r"\bgovuk-heading-l\b"))
+    if not h1:
+        return None
+    for span in h1.find_all(class_=re.compile(r"\bsr-only\b")):
+        span.decompose()
+    text = h1.get_text(" ", strip=True)
+    return text or None
+
+
+def extract_charity_commission_accounts_links(html: Optional[str], base_url: str) -> List[Tuple[str, str]]:
+    if not html:
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    links: List[Tuple[str, str]] = []
+    for anchor in soup.select("a.accounts-download-link, a[href*='accounts-resource']"):
+        href = anchor.get("href")
+        if not href:
+            continue
+        label = anchor.get("aria-label") or anchor.get_text(" ", strip=True)
+        label = re.sub(r"\s+", " ", (label or "")).strip()
+        full_url = urljoin(base_url, href)
+        if not label:
+            label = "Accounts download"
+        links.append((label, full_url))
+    deduped: List[Tuple[str, str]] = []
+    seen = set()
+    for label, href in links:
+        if href in seen:
+            continue
+        seen.add(href)
+        deduped.append((label, href))
+    return deduped
+
+
+def download_and_extract_pdf_text(url: str, *, max_chars: int = 20000) -> Dict[str, Any]:
+    try:
+        from PyPDF2 import PdfReader
+    except Exception as exc:
+        return {"success": False, "error": f"PyPDF2 not available: {exc}"}
+
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+
+        pdf_file = io.BytesIO(response.content)
+        pdf_reader = PdfReader(pdf_file)
+
+        text_parts: List[str] = []
+        for page in pdf_reader.pages:
+            page_text = page.extract_text() or ""
+            if page_text:
+                text_parts.append(page_text)
+
+        full_text = "\n".join(text_parts).strip()
+        if max_chars and len(full_text) > max_chars:
+            full_text = full_text[:max_chars] + "\n...[pdf text truncated]..."
+
+        return {
+            "success": True,
+            "text": full_text,
+            "num_pages": len(pdf_reader.pages),
+            "file_size": len(response.content),
+        }
+    except requests.exceptions.RequestException as exc:
+        return {"success": False, "error": f"Download error: {exc}"}
+    except Exception as exc:
+        return {"success": False, "error": f"PDF processing error: {exc}"}
 
 
 def discover_links(seed_url: str, discovery_depth: int = DISCOVERY_DEPTH, max_pages: int = MAX_DISCOVERY_PAGES) -> Dict:
@@ -271,21 +402,37 @@ def score_candidate(url: str, meta: Dict) -> int:
     return score
 
 
-def prioritized_crawl(seed_url: str) -> Tuple[str, str, int, List[str]]:
+def prioritized_crawl(seed_url: str) -> Tuple[str, str, int, List[str], Dict[str, Any]]:
     """Crawl and prioritize only the related internal pages."""
     seed_base = initial_normalize_url(seed_url)
     seed_norm = normalize_url(seed_url)
     domain_folder = os.path.join(SAVE_DIR, safe_filename_from_url(seed_base))
     os.makedirs(domain_folder, exist_ok=True)
 
+    is_charity_commission = is_charity_commission_url(seed_norm)
     candidates = discover_links(seed_norm)
     candidates.setdefault(seed_norm, {"anchor_texts": set(), "source_titles": set(), "source_snippets": set()})
     scored = [(score_candidate(url, meta), url) for url, meta in candidates.items()]
     scored.sort(reverse=True)
 
     top_links = [url for _, url in scored[:MAX_PAGES]]
+    if is_charity_commission:
+        accounts_url = f"{seed_base}/accounts-and-annual-returns"
+        if accounts_url not in top_links:
+            if len(top_links) >= MAX_PAGES:
+                top_links = top_links[: MAX_PAGES - 1]
+            top_links.append(accounts_url)
     _log(f"🌐 Fetching top {len(top_links)} links from {seed_base}")
 
+    visited_urls: List[str] = []
+    seen_urls: Set[str] = set()
+    for url in top_links:
+        if url in seen_urls:
+            continue
+        visited_urls.append(url)
+        seen_urls.add(url)
+
+    pdf_meta: Dict[str, Any] = {"pdf_read": False, "pdf_url": "", "pdf_pages": 0, "pdf_text": ""}
     all_text = []
     for i, url in enumerate(top_links, 1):
         _log(f"&nbsp;&nbsp;↳ ({i}/{len(top_links)}) {url}")
@@ -293,6 +440,27 @@ def prioritized_crawl(seed_url: str) -> Tuple[str, str, int, List[str]]:
         if not html:
             continue
         text = extract_visible_text(html)
+        if is_charity_commission and "accounts-and-annual-returns" in url:
+            accounts_links = extract_charity_commission_accounts_links(html, url)
+            if accounts_links:
+                label, href = accounts_links[0]
+                lines = ["Accounts and annual returns download (latest):", f"- {label}: {href}"]
+                pdf_meta["pdf_url"] = href
+                pdf_result = download_and_extract_pdf_text(href)
+                if pdf_result.get("success"):
+                    pdf_meta["pdf_read"] = True
+                    pdf_meta["pdf_pages"] = pdf_result.get("num_pages", 0)
+                    pdf_text = pdf_result.get("text", "")
+                    pdf_meta["pdf_text"] = pdf_text
+                    if pdf_text:
+                        lines.append("Accounts PDF extracted text:")
+                        lines.append(pdf_text)
+                else:
+                    _log(f"PDF extraction failed for {href}: {pdf_result.get('error')}", "warning")
+                text = f"{text}\n" + "\n".join(lines)
+                if href not in seen_urls:
+                    visited_urls.append(href)
+                    seen_urls.add(href)
         all_text.append(text)
         fname = safe_filename_from_url(url) + ".txt"
         with open(os.path.join(domain_folder, fname), "w", encoding="utf-8") as f:
@@ -300,7 +468,7 @@ def prioritized_crawl(seed_url: str) -> Tuple[str, str, int, List[str]]:
         time.sleep(PAUSE_BETWEEN_REQUESTS)
 
     combined_text = " ".join(all_text)
-    return combined_text, domain_folder, len(all_text), top_links
+    return combined_text, domain_folder, len(all_text), visited_urls, pdf_meta
 
 
 def call_llm_extract(text: str) -> Dict:
@@ -406,8 +574,30 @@ def _require_google_config() -> Tuple[dict, str]:
     return _SETTINGS.google_service_account, _SETTINGS.google_sheet_id
 
 
+def _format_service_account_for_log(service_account: Any) -> str:
+    """Return a safe-to-log summary of the service account config."""
+    if isinstance(service_account, dict):
+        summary = {
+            "type": service_account.get("type"),
+            "project_id": service_account.get("project_id"),
+            "client_email": service_account.get("client_email"),
+            "private_key_id": service_account.get("private_key_id"),
+            "has_private_key": bool(service_account.get("private_key")),
+        }
+        return str(summary)
+    # Fall back to a short preview for unexpected types (e.g. JSON string).
+    text = str(service_account)
+    preview = text if len(text) <= 200 else text[:200] + "...(truncated)"
+    return f"{type(service_account).__name__}: {preview}"
+
+
 def _get_sheet(retries: int = 3, delay: int = 1):
     creds_info, sheet_id = _require_google_config()
+    _log(
+        f"Google Sheets config: sheet_id={sheet_id} "
+        f"service_account={_format_service_account_for_log(creds_info)}",
+        "info",
+    )
 
     def try_connect():
         creds = Credentials.from_service_account_info(
@@ -428,7 +618,13 @@ def _get_sheet(retries: int = 3, delay: int = 1):
             time.sleep(delay * (2**attempt))
         except Exception as exc:
             if attempt == retries - 1:
-                _log(f"Failed to connect to Google Sheets: {exc}", "error")
+                _log(
+                    "Failed to connect to Google Sheets. "
+                    f"sheet_id={sheet_id} "
+                    f"service_account={_format_service_account_for_log(creds_info)} "
+                    f"error={exc}",
+                    "error",
+                )
                 raise
             time.sleep(delay * (2**attempt))
 
@@ -474,6 +670,96 @@ def canon_funder_url(url: str) -> str:
         return url.strip().lower()
 
 
+def latest_results_by_key(df: pd.DataFrame, *, key_func: Callable[[str], str]) -> pd.DataFrame:
+    """Return the most recent row per key_func(url) based on extraction_timestamp."""
+    if df is None:
+        return pd.DataFrame(columns=CSV_COLUMNS)
+    if df.empty or "fund_url" not in df.columns:
+        return df.copy()
+
+    working = df.copy()
+    working["_row_order"] = range(len(working))
+    working["_result_key"] = (
+        working["fund_url"].fillna("").astype(str).str.strip().apply(lambda u: key_func(u) if u else "")
+    )
+    if "extraction_timestamp" in working.columns:
+        parsed = pd.to_datetime(working["extraction_timestamp"].apply(parse_extraction_timestamp), errors="coerce")
+    else:
+        parsed = pd.Series(pd.NaT, index=working.index)
+    working["_parsed_ts"] = parsed
+    # Use a stable sort and keep NaT first so bad/missing timestamps don't
+    # override valid newer rows for the same URL key.
+    working = working.sort_values(
+        by=["_result_key", "_parsed_ts", "_row_order"],
+        kind="mergesort",
+        na_position="first",
+    )
+    latest = working.drop_duplicates(subset="_result_key", keep="last")
+    latest = latest.drop(columns=["_result_key", "_parsed_ts", "_row_order"])
+    return latest
+
+
+def stale_results_by_key(
+    df: pd.DataFrame, *, months: int = 3, key_func: Callable[[str], str]
+) -> pd.DataFrame:
+    """Return latest rows that are older than the month cutoff (or have no timestamp)."""
+    latest = latest_results_by_key(df, key_func=key_func)
+    if latest.empty:
+        return latest
+    parsed = (
+        pd.to_datetime(latest["extraction_timestamp"].apply(parse_extraction_timestamp), errors="coerce")
+        if "extraction_timestamp" in latest.columns
+        else pd.Series(pd.NaT, index=latest.index)
+    )
+    cutoff = subtract_months(datetime.now(), months)
+    stale_mask = parsed.isna() | (parsed < cutoff)
+    return latest.loc[stale_mask].copy()
+
+
+def latest_results_by_url(df: pd.DataFrame) -> pd.DataFrame:
+    """Latest results using normalized URLs for grouping."""
+    return latest_results_by_key(df, key_func=normalize_url)
+
+
+def latest_results_by_canon_url(df: pd.DataFrame) -> pd.DataFrame:
+    """Latest results using canonical funder URLs for grouping."""
+    return latest_results_by_key(df, key_func=canon_funder_url)
+
+
+def stale_results_by_url(df: pd.DataFrame, *, months: int = 3) -> pd.DataFrame:
+    """Stale results using normalized URLs for grouping."""
+    return stale_results_by_key(df, months=months, key_func=normalize_url)
+
+
+def stale_results_by_canon_url(df: pd.DataFrame, *, months: int = 3) -> pd.DataFrame:
+    """Stale results using canonical funder URLs for grouping."""
+    return stale_results_by_key(df, months=months, key_func=canon_funder_url)
+
+
+def ensure_sheet_header(ws) -> None:
+    """Ensure the Google Sheet header row includes all CSV columns."""
+    try:
+        header = ws.row_values(1)
+    except Exception as exc:
+        _log(f"Failed to read sheet header: {exc}", "warning")
+        return
+
+    if not header:
+        try:
+            ws.insert_row(CSV_COLUMNS, 1)
+        except Exception as exc:
+            _log(f"Failed to initialize sheet header: {exc}", "warning")
+        return
+
+    missing = [col for col in CSV_COLUMNS if col not in header]
+    if not missing:
+        return
+    try:
+        ws.update("1:1", [header + missing])
+    except Exception as exc:
+        _log(f"Failed to update sheet header: {exc}", "warning")
+
+
 def append_to_google_sheet(rows: List[dict]):
     """
     Permanently store results in Google Sheets.
@@ -481,11 +767,16 @@ def append_to_google_sheet(rows: List[dict]):
     """
     try:
         ws = _get_sheet()
+        ensure_sheet_header(ws)
+        header = ws.row_values(1)
+        if not header:
+            header = list(CSV_COLUMNS)
 
-        # Convert dicts to list-of-lists in column order
+        # Use the live sheet header order so values always land in the right column,
+        # even if the header order differs from CSV_COLUMNS.
         data = []
         for r in rows:
-            row = [r.get(col, "") for col in CSV_COLUMNS]
+            row = [r.get(col, "") for col in header]
             data.append(row)
 
         ws.append_rows(data, value_input_option="RAW")
@@ -509,6 +800,7 @@ def _load_results_csv_cached() -> pd.DataFrame:
         df = pd.DataFrame(rows, columns=header)
     except Exception as exc:
         _log(f"Error loading from Google Sheet: {exc}", "error")
+        _log("Google Services account is: " + str(_SETTINGS.google_service_account), "debug")
         df = pd.DataFrame(columns=CSV_COLUMNS)
 
     for col in CSV_COLUMNS:
@@ -571,22 +863,6 @@ def clear_scraped_domains_cache() -> None:
     _get_scraped_domains_cached.cache_clear()
 
 
-def save_results_to_csv(results: List[dict], output_csv: str = OUTPUT_CSV):
-    if not results:
-        return
-    results_df = pd.DataFrame(results)
-    for col in CSV_COLUMNS:
-        if col not in results_df.columns:
-            results_df[col] = ""
-    results_df = results_df[CSV_COLUMNS]
-    os.makedirs(os.path.dirname(output_csv) or ".", exist_ok=True)
-    if os.path.exists(output_csv):
-        results_df.to_csv(output_csv, mode="a", index=False, header=False)
-    else:
-        results_df.to_csv(output_csv, index=False)
-    clear_results_cache()
-
-
 def load_text_from_folder(folder_path: str) -> tuple[str, int, str]:
     txt_files = list(Path(folder_path).glob("*.txt"))
     if not txt_files:
@@ -614,12 +890,25 @@ def load_text_from_folder(folder_path: str) -> tuple[str, int, str]:
 # =========================================
 
 
-def process_single_fund(url: str, fund_name: Optional[str] = None) -> dict:
+def process_single_fund(url: str, fund_name: Optional[str] = None, *, persist: bool = True) -> dict:
+    if fund_name:
+        fund_name = fund_name.strip()
+    if not fund_name or "<" in fund_name or "register of charities" in fund_name.lower():
+        if is_charity_commission_url(url):
+            seed_html = fetch_page(url)
+            extracted_name = extract_charity_commission_name(seed_html)
+            if extracted_name:
+                fund_name = extracted_name
     fund_name = fund_name or urlparse(url).netloc
     result = {"fund_url": url, "fund_name": fund_name, "extraction_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
     # TODO: Emit structured log/metric events for each scrape stage to aid backend observability.
     try:
-        text, folder, pages_scraped, visited_urls = prioritized_crawl(url)
+        text, folder, pages_scraped, visited_urls, pdf_meta = prioritized_crawl(url)
+        result["visited_urls"] = visited_urls
+        result["pdf_read"] = bool(pdf_meta.get("pdf_read"))
+        result["pdf_url"] = pdf_meta.get("pdf_url", "")
+        result["pdf_pages"] = pdf_meta.get("pdf_pages", 0)
+        result["pdf_text"] = pdf_meta.get("pdf_text", "")
         if not text or len(text) < 100:
             result["error"] = "Insufficient text extracted"
             _log(f"Insufficient text extracted for {url}", "warning")
@@ -649,12 +938,13 @@ def process_single_fund(url: str, fund_name: Optional[str] = None) -> dict:
             _log(f"Processing failed for {url}: {msg}", "error")
         result["error"] = msg
     finally:
-        # Persist to Google Sheet as soon as each fund finishes (even if errored)
-        try:
-            append_to_google_sheet([result])
-            clear_results_cache()
-        except Exception as e:  # pragma: no cover - external dependency
-            _log(f"Failed to persist {url} to Google Sheets: {e}", "error")
+        if persist:
+            # Persist to Google Sheet as soon as each fund finishes (even if errored)
+            try:
+                append_to_google_sheet([result])
+                clear_results_cache()
+            except Exception as e:  # pragma: no cover - external dependency
+                _log(f"Failed to persist {url} to Google Sheets: {e}", "error")
     return result
 
 

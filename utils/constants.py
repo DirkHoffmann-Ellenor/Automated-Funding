@@ -67,9 +67,16 @@ CSV_COLUMNS = [
     "evidence",
     "pages_scraped",
     "visited_urls_count",
+    "pdf_read",
+    "pdf_url",
+    "pdf_pages",
+    "pdf_text",
     "extraction_timestamp",
     "error"
-]
+]				
+
+
+
 
 KEYWORDS = ["grant", "grants", "apply", "fund", "funding", "eligible", "eligibility",
             "criteria", "who-can-apply", "what-we-fund", "apply-for", "apply-for-funding",

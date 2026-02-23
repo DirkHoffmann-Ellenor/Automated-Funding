@@ -28,6 +28,8 @@ def _prepare_urls_for_scrape(
     """
     Normalize URLs, drop duplicates, and flag any that were already processed.
     Rescrape URLs can be explicitly allowed to bypass the duplicate check.
+    This is used by the expired/rescrape flow where existing rows should still be
+    scraped again and appended as fresh results.
     """
     processed = tools_module.get_already_processed_urls(force_refresh=True)
     allow_rescrape = allow_rescrape or set()
@@ -104,7 +106,11 @@ def scrape_batch(
     rescrape_urls = [str(url) for url in payload.rescrape_urls] if payload.rescrape_urls else []
     if rescrape_urls:
         raw_urls.extend(rescrape_urls)
-    prepared = _prepare_urls_for_scrape(raw_urls, tools_module=tools_module, allow_rescrape=set(rescrape_urls))
+    prepared = _prepare_urls_for_scrape(
+        raw_urls,
+        tools_module=tools_module,
+        allow_rescrape=set(rescrape_urls),
+    )
     if not prepared["to_scrape"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -119,6 +125,7 @@ def scrape_batch(
         already_processed=prepared["already_processed"],
         duplicates_in_payload=prepared["duplicates_in_payload"],
         rescrape_urls=payload.rescrape_urls,
+        rescrape_scope=payload.rescrape_scope,
     )
 
 

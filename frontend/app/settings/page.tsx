@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api } from "../../lib/api";
+import { api, API_BASE_URL } from "../../lib/api";
 import { Button } from "../../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card";
 import { Input } from "../../components/ui/input";
@@ -12,6 +12,7 @@ const LOCAL_OPENAI_KEY = "ellenor_openai_key";
 export default function SettingsPage() {
   const [apiKey, setApiKey] = useState("");
   const [sheetId] = useState("Managed on server");
+  const [apiBase] = useState(API_BASE_URL);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -70,6 +71,11 @@ export default function SettingsPage() {
               <Label htmlFor="sheet-id">Google Sheet ID</Label>
               <Input id="sheet-id" value={sheetId} disabled className="text-neutral-500" />
               <p className="text-xs text-neutral-500">Managed server-side with the service account and not editable here.</p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="api-base">API base URL</Label>
+              <Input id="api-base" value={apiBase} disabled className="text-neutral-500" />
+              <p className="text-xs text-neutral-500">Change with NEXT_PUBLIC_API_BASE_URL in your environment.</p>
             </div>
           </div>
           <Button className="mt-2" onClick={handleSave} disabled={saving || !apiKey.trim()}>

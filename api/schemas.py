@@ -1,7 +1,7 @@
 """Pydantic schemas for the FastAPI service."""
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, HttpUrl
 
@@ -28,6 +28,10 @@ class ScrapeResponse(BaseModel):
 class BatchScrapeRequest(BaseModel):
     fund_urls: List[HttpUrl]
     rescrape_urls: List[HttpUrl] = Field(default_factory=list, description="Already processed URLs to re-scrape")
+    rescrape_scope: Literal["stale", "any"] = Field(
+        default="stale",
+        description="Whether rescrape_urls are restricted to stale rows only or can target any existing row.",
+    )
 
 
 class JobCreatedResponse(BaseModel):
@@ -37,6 +41,7 @@ class JobCreatedResponse(BaseModel):
     already_processed: List[HttpUrl] = Field(default_factory=list)
     duplicates_in_payload: List[HttpUrl] = Field(default_factory=list)
     rescrape_urls: List[HttpUrl] = Field(default_factory=list)
+    rescrape_scope: Literal["stale", "any"] = "stale"
 
 
 class JobError(BaseModel):
@@ -70,6 +75,12 @@ class JobStatusResponse(BaseModel):
 
 class ResultsResponse(BaseModel):
     results: List[Dict[str, Any]]
+
+
+class StaleResultsResponse(BaseModel):
+    results: List[Dict[str, Any]]
+    months: int = 3
+    cutoff_timestamp: Optional[str] = None
 
 
 class RefreshResultsResponse(BaseModel):

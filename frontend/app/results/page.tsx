@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card";
 import { Checkbox } from "../../components/ui/checkbox";
 import { Input } from "../../components/ui/input";
 import { Label } from "../../components/ui/label";
@@ -32,7 +32,7 @@ const eligibilityTone: Record<string, "accent" | "muted" | "outline"> = {
 };
 
 
-const detailFields = [
+const detailFields: { accessor: string; label: string; formatter?: (row: ResultRecord) => string }[] = [
   { accessor: "applicant_types", label: "Applicant types" },
   { accessor: "geographic_scope", label: "Geographic scope" },
   { accessor: "beneficiary_focus", label: "Beneficiary focus" },
@@ -46,71 +46,16 @@ const detailFields = [
   { accessor: "evidence", label: "Evidence" },
   { accessor: "pages_scraped", label: "Pages scraped" },
   { accessor: "visited_urls_count", label: "Visited URLs count" },
-  { accessor: "extraction_timestamp", label: "Extraction timestamp" },
+  { accessor: "pdf_read", label: "PDF read", formatter: (row) => formatPdfRead(row.pdf_read) },
+  { accessor: "pdf_pages", label: "PDF pages" },
+  { accessor: "pdf_url", label: "PDF URL" },
+  { accessor: "extraction_timestamp", label: "Scraped date", formatter: (row) => formatTimestamp(row.extraction_timestamp) },
   { accessor: "error", label: "Error" },
   { accessor: "source_folder", label: "Source folder" },
   { accessor: "Processed", label: "Processed" },
 ];
 
 const eligibilityFilterOptions = ["Highly Eligible", "Eligible", "Possibly Eligible", "Low Match", "Not Eligible"];
-
-const columnFilterConfig = [
-  {
-    key: "fund",
-    label: "Fund name / URL",
-    accessors: ["fund_name", "fund_url"],
-    placeholder: "e.g. climate, foundation",
-  },
-  {
-    key: "applicantTypes",
-    label: "Applicant types",
-    accessors: ["applicant_types"],
-    placeholder: "e.g. nonprofit, charity",
-  },
-  {
-    key: "geographicScope",
-    label: "Geographic scope",
-    accessors: ["geographic_scope"],
-    placeholder: "e.g. UK, EU",
-  },
-  {
-    key: "beneficiaryFocus",
-    label: "Beneficiary focus",
-    accessors: ["beneficiary_focus"],
-    placeholder: "e.g. youth, health",
-  },
-  {
-    key: "restrictions",
-    label: "Restrictions",
-    accessors: ["restrictions"],
-    placeholder: "e.g. match funding",
-  },
-  {
-    key: "applicationStatus",
-    label: "Status",
-    accessors: ["application_status"],
-    placeholder: "e.g. open, rolling",
-  },
-  {
-    key: "notes",
-    label: "Notes",
-    accessors: ["notes"],
-    placeholder: "keywords in notes",
-  },
-] as const;
-
-type ColumnFilterKey = (typeof columnFilterConfig)[number]["key"];
-type ColumnFilters = Record<ColumnFilterKey, string>;
-
-const defaultColumnFilters: ColumnFilters = {
-  fund: "",
-  applicantTypes: "",
-  geographicScope: "",
-  beneficiaryFocus: "",
-  restrictions: "",
-  applicationStatus: "",
-  notes: "",
-};
 
 const sortOptions: { value: SortMode; label: string }[] = [
   { value: "recent", label: "Most recent" },
@@ -123,11 +68,8 @@ type ResultsCache = {
   eligibilityFilter: string[];
   sortMode: SortMode;
   search: string;
-  columnFilters: ColumnFilters;
   onlyFutureDeadlines: boolean;
-  onlyNonprofits: boolean;
   minFunding: string;
-  fundingKeywords: string;
   showEvidence: boolean;
   pinnedRowKey: string | null;
 };
@@ -142,11 +84,8 @@ export default function ResultsPage() {
   const [eligibilityFilter, setEligibilityFilter] = useState<string[]>([]);
   const [sortMode, setSortMode] = useState<SortMode>("recent");
   const [search, setSearch] = useState("");
-  const [columnFilters, setColumnFilters] = useState<ColumnFilters>(defaultColumnFilters);
   const [onlyFutureDeadlines, setOnlyFutureDeadlines] = useState(false);
-  const [onlyNonprofits, setOnlyNonprofits] = useState(false);
   const [minFunding, setMinFunding] = useState("");
-  const [fundingKeywords, setFundingKeywords] = useState("");
   const [showEvidence, setShowEvidence] = useState(true);
   const [selectedRowKey, setSelectedRowKey] = useState<string | null>(null);
   const [expandedRows, setExpandedRows] = useState<Set<string>>(() => new Set());
@@ -157,13 +96,36 @@ export default function ResultsPage() {
   const [shouldForceRefresh, setShouldForceRefresh] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
 
+  const filtersActive = useMemo(() => {
+    const eligibilityActive =
+      eligibilityFilter.length > 0 && eligibilityFilter.length !== eligibilityFilterOptions.length;
+    if (search.trim() || minFunding.trim()) return true;
+    if (onlyFutureDeadlines) return true;
+    if (eligibilityActive) return true;
+    return false;
+  }, [
+    search,
+    minFunding,
+    onlyFutureDeadlines,
+    eligibilityFilter,
+  ]);
+
+  const resetFilters = useCallback(() => {
+    setEligibilityFilter(eligibilityFilterOptions);
+    setSortMode("recent");
+    setSearch("");
+    setOnlyFutureDeadlines(false);
+    setMinFunding("");
+  }, []);
+
   const fetchLatest = useCallback(
-    async (opts?: { showLoading?: boolean }) => {
+    async (opts?: { showLoading?: boolean; forceRefresh?: boolean }) => {
       const showLoading = opts?.showLoading ?? false;
+      const forceRefresh = opts?.forceRefresh ?? false;
       setRefreshing(true);
       if (showLoading) setLoading(true);
       try {
-        const res = await api.results();
+        const res = await api.results({ forceRefresh });
         setData(res.results || []);
         setHasCachedData(Boolean(res.results && res.results.length));
         setEligibilityFilter((prev) => (prev.length === 0 ? eligibilityFilterOptions : prev));
@@ -192,11 +154,8 @@ export default function ResultsPage() {
       );
       setSortMode(cached.sortMode || "recent");
       setSearch(cached.search || "");
-      setColumnFilters({ ...defaultColumnFilters, ...(cached.columnFilters || {}) });
       setOnlyFutureDeadlines(Boolean(cached.onlyFutureDeadlines));
-      setOnlyNonprofits(Boolean(cached.onlyNonprofits));
       setMinFunding(cached.minFunding || "");
-      setFundingKeywords(cached.fundingKeywords || "");
       setShowEvidence(cached.showEvidence ?? true);
       setPinnedRowKey(cached.pinnedRowKey || legacyPinned?.fund_url || null);
       setHasCachedData(Boolean(cached.data && cached.data.length));
@@ -216,7 +175,7 @@ export default function ResultsPage() {
 
   useEffect(() => {
     if (!hydratedCache || !shouldForceRefresh) return;
-    fetchLatest({ showLoading: true });
+    fetchLatest({ showLoading: true, forceRefresh: true });
   }, [hydratedCache, shouldForceRefresh, fetchLatest]);
 
   useEffect(() => {
@@ -226,11 +185,8 @@ export default function ResultsPage() {
       eligibilityFilter,
       sortMode,
       search,
-      columnFilters,
       onlyFutureDeadlines,
-      onlyNonprofits,
       minFunding,
-      fundingKeywords,
       showEvidence,
       pinnedRowKey,
     };
@@ -240,11 +196,8 @@ export default function ResultsPage() {
     eligibilityFilter,
     sortMode,
     search,
-    columnFilters,
     onlyFutureDeadlines,
-    onlyNonprofits,
     minFunding,
-    fundingKeywords,
     showEvidence,
     pinnedRowKey,
     hydratedCache,
@@ -252,7 +205,6 @@ export default function ResultsPage() {
 
   const visibleResults = useMemo(() => {
     const query = search.trim().toLowerCase();
-    const fundingQuery = fundingKeywords.trim().toLowerCase();
     const minFundingValue = parseCurrencyInput(minFunding);
     const now = Date.now();
 
@@ -262,21 +214,12 @@ export default function ResultsPage() {
       if (!inFilter) return false;
 
       if (query && !matchesGlobalSearch(row, query)) return false;
-      if (!matchesColumnFilters(row, columnFilters)) return false;
 
       if (onlyFutureDeadlines && !isFutureDeadline(row.deadline, now)) return false;
-      if (onlyNonprofits && !matchesNonprofit(row.applicant_types)) return false;
 
       if (minFundingValue !== null) {
         const maxFunding = parseFundingRangeMax(row.funding_range);
         if (maxFunding === null || maxFunding < minFundingValue) return false;
-      }
-
-      if (fundingQuery) {
-        const fundingText = [row.funding_range, row.notes, row.restrictions]
-          .map((val) => normalizeText(val).toLowerCase())
-          .join(" ");
-        if (!fundingText.includes(fundingQuery)) return false;
       }
 
       return true;
@@ -302,17 +245,15 @@ export default function ResultsPage() {
     eligibilityFilter,
     search,
     sortMode,
-    columnFilters,
     onlyFutureDeadlines,
-    onlyNonprofits,
     minFunding,
-    fundingKeywords,
   ]);
 
   const detailFieldList = useMemo(
     () => (showEvidence ? detailFields : detailFields.filter((field) => field.accessor !== "evidence")),
     [showEvidence],
   );
+  const searchQuery = search.trim();
 
   const selectedIndex = useMemo(() => {
     if (visibleResults.length === 0) return -1;
@@ -427,11 +368,6 @@ export default function ResultsPage() {
   return (
     <div className="space-y-6">
       <header className="space-y-1">
-        <p className="text-sm uppercase tracking-wide text-neutral-500">Results</p>
-        <h1 className="text-3xl font-bold text-neutral-950">LLM extractions & evidence</h1>
-        <p className="text-sm text-neutral-600">
-          Use column filters, expand rows for full details, and download the filtered view.
-        </p>
       </header>
 
       <Card className="overflow-hidden">
@@ -440,8 +376,16 @@ export default function ResultsPage() {
           <CardTitle className="flex flex-wrap items-center justify-between gap-3">
             <span>Funding results</span>
             <div className="flex flex-wrap items-center gap-2">
-              <Button variant="outline" size="sm" onClick={() => fetchLatest({ showLoading: true })} disabled={refreshing}>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => fetchLatest({ showLoading: true, forceRefresh: true })}
+                disabled={refreshing}
+              >
                 {refreshing ? "Refreshing..." : "Refresh"}
+              </Button>
+              <Button variant="outline" size="sm" onClick={resetFilters} disabled={!filtersActive}>
+                Clear filters
               </Button>
               <Button
                 variant="outline"
@@ -451,15 +395,13 @@ export default function ResultsPage() {
               >
                 Download filtered
               </Button>
-              <Button variant="outline" size="sm" onClick={() => setShowEvidence((prev) => !prev)}>
-                {showEvidence ? "Hide evidence" : "Show evidence"}
-              </Button>
-              {!loading && <Badge variant="outline">{visibleResults.length} shown</Badge>}
+              {!loading && (
+                <Badge variant="outline">
+                  {filtersActive ? `${visibleResults.length} of ${data.length} shown` : `${visibleResults.length} shown`}
+                </Badge>
+              )}
             </div>
           </CardTitle>
-          <CardDescription>
-            Column filters, funding thresholds, and expandable rows replace the old detail panel.
-          </CardDescription>
           {refreshing && <p className="text-xs text-neutral-500">Refreshing latest data...</p>}
         </CardHeader>
         <CardContent className="space-y-5">
@@ -525,14 +467,10 @@ export default function ResultsPage() {
               </div>
             </div>
 
-            <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
+            <div className="grid gap-3 md:grid-cols-2">
               <label className="flex items-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-700">
                 <Checkbox checked={onlyFutureDeadlines} onChange={(e) => setOnlyFutureDeadlines(e.target.checked)} />
                 Future deadlines only
-              </label>
-              <label className="flex items-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-700">
-                <Checkbox checked={onlyNonprofits} onChange={(e) => setOnlyNonprofits(e.target.checked)} />
-                Nonprofits OK
               </label>
               <div className="space-y-1">
                 <Label htmlFor="min-funding" className="text-xs uppercase tracking-wide text-neutral-600">
@@ -545,46 +483,6 @@ export default function ResultsPage() {
                   onChange={(e) => setMinFunding(e.target.value)}
                 />
               </div>
-              <div className="space-y-1">
-                <Label htmlFor="funding-keywords" className="text-xs uppercase tracking-wide text-neutral-600">
-                  Funding keywords
-                </Label>
-                <Input
-                  id="funding-keywords"
-                  placeholder="e.g. capital, equipment"
-                  value={fundingKeywords}
-                  onChange={(e) => setFundingKeywords(e.target.value)}
-                />
-              </div>
-            </div>
-
-            <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-              {columnFilterConfig.map((filter) => (
-                <div key={filter.key} className="space-y-1">
-                  <Label htmlFor={`filter-${filter.key}`} className="text-xs uppercase tracking-wide text-neutral-600">
-                    {filter.label}
-                  </Label>
-                  <Input
-                    id={`filter-${filter.key}`}
-                    placeholder={filter.placeholder}
-                    value={columnFilters[filter.key]}
-                    onChange={(e) =>
-                      setColumnFilters((prev) => ({
-                        ...prev,
-                        [filter.key]: e.target.value,
-                      }))
-                    }
-                  />
-                </div>
-              ))}
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-500">
-              <span className="font-semibold text-neutral-700">Shortcuts</span>
-              <span>Up/Down move</span>
-              <span>Enter pin</span>
-              <span>F search</span>
-              <span>E evidence</span>
             </div>
           </div>
 
@@ -592,12 +490,14 @@ export default function ResultsPage() {
           {error && <p className="text-sm text-red-600">{error}</p>}
 
           {!loading && !error && (
-            <Table>
+            <Table className="table-fixed">
               <TableHeader>
                 <TableRow className="bg-neutral-50">
                   <TableHead className="w-12">Details</TableHead>
                   {tableColumns.map((col) => (
-                    <TableHead key={col.accessor}>{col.label}</TableHead>
+                    <TableHead key={col.accessor} className={col.widthClassName}>
+                      {col.label}
+                    </TableHead>
                   ))}
                 </TableRow>
               </TableHeader>
@@ -632,29 +532,29 @@ export default function ResultsPage() {
                           </Button>
                         </TableCell>
                         {tableColumns.map((col) => (
-                          <TableCell key={col.accessor}>
-                            {col.render ? col.render(row) : row[col.accessor] ?? "-"}
+                          <TableCell key={col.accessor} className={col.widthClassName}>
+                            {col.render ? col.render(row, searchQuery) : row[col.accessor] ?? "-"}
                           </TableCell>
                         ))}
                       </TableRow>
                       {isExpanded && (
                         <TableRow className="bg-white">
                           <TableCell colSpan={tableColumns.length + 1} className="bg-white">
-                            <div className="rounded-xl border border-neutral-200 bg-white p-4 shadow-sm">
+                            <div className="min-w-0 rounded-xl border border-neutral-200 bg-white p-4 shadow-sm">
                               <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                                 <div className="space-y-1">
                                   <p className="text-xs uppercase tracking-wide text-neutral-500">Fund</p>
                                   <p className="text-base font-semibold text-neutral-900">
-                                    {row.fund_name || "Unnamed fund"}
+                                    {highlightText(row.fund_name || "Unnamed fund", searchQuery)}
                                   </p>
                                   {row.fund_url ? (
                                     <a
                                       href={row.fund_url}
                                       target="_blank"
                                       rel="noreferrer"
-                                      className="block text-xs text-neutral-600 underline decoration-neutral-300 underline-offset-4 hover:text-neutral-900"
+                                      className="block break-all text-xs text-neutral-600 underline decoration-neutral-300 underline-offset-4 hover:text-neutral-900"
                                     >
-                                      {row.fund_url}
+                                      {highlightText(row.fund_url, searchQuery)}
                                     </a>
                                   ) : (
                                     <p className="text-xs text-neutral-500">No URL provided.</p>
@@ -678,19 +578,36 @@ export default function ResultsPage() {
                               {!showEvidence && (
                                 <p className="text-xs text-neutral-500">Evidence hidden. Press E to show it.</p>
                               )}
-                              <div className="grid gap-3 md:grid-cols-2">
+                              <div className="space-y-2">
                                 {detailFieldList.map((field) => (
                                   <div
                                     key={field.accessor}
                                     className="rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2"
                                   >
                                     <p className="text-[11px] uppercase tracking-wide text-neutral-500">{field.label}</p>
-                                    <p className="text-sm text-neutral-900">
-                                      {formatValue(row[field.accessor as keyof ResultRecord])}
+                                    <p className="mt-1 whitespace-pre-wrap break-words text-sm text-neutral-900">
+                                      {highlightText(
+                                        field.formatter
+                                          ? field.formatter(row)
+                                          : formatValue(row[field.accessor as keyof ResultRecord]),
+                                        searchQuery,
+                                      )}
                                     </p>
                                   </div>
                                 ))}
                               </div>
+                              {row.pdf_text && (
+                                <div className="mt-4">
+                                  <details className="rounded-lg border border-neutral-200 bg-white px-3 py-2">
+                                    <summary className="cursor-pointer text-[11px] uppercase tracking-wide text-neutral-600">
+                                      PDF text (truncated)
+                                    </summary>
+                                    <pre className="mt-2 max-h-64 overflow-y-auto whitespace-pre-wrap break-words text-xs text-neutral-700">
+                                      {highlightText(String(row.pdf_text), searchQuery)}
+                                    </pre>
+                                  </details>
+                                </div>
+                              )}
                             </div>
                           </TableCell>
                         </TableRow>
@@ -728,9 +645,53 @@ function getSortTimestamp(row: ResultRecord) {
   return deadlineTime !== null ? deadlineTime : 0;
 }
 
+function formatTimestamp(value: any) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString();
+}
+
+function isPdfRead(value: any) {
+  if (value === true) return true;
+  if (typeof value === "number") return value > 0;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    return ["true", "yes", "1", "y"].includes(normalized);
+  }
+  return false;
+}
+
+function formatPdfRead(value: any) {
+  return isPdfRead(value) ? "Yes" : "No";
+}
+
 function formatValue(val: any) {
   if (val === null || val === undefined || val === "") return "-";
   return Array.isArray(val) ? val.join(", ") : String(val);
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function highlightText(value: any, query: string): ReactNode {
+  const text = normalizeText(value);
+  if (!text) return "-";
+  const trimmedQuery = query.trim();
+  if (!trimmedQuery) return text;
+
+  const queryLower = trimmedQuery.toLowerCase();
+  const regex = new RegExp(`(${escapeRegExp(trimmedQuery)})`, "ig");
+  return text.split(regex).map((part, idx) =>
+    part.toLowerCase() === queryLower ? (
+      <mark key={`${part}-${idx}`} className="rounded bg-amber-200/80 px-0.5 text-inherit">
+        {part}
+      </mark>
+    ) : (
+      part
+    ),
+  );
 }
 
 function normalizeText(val: any) {
@@ -742,14 +703,6 @@ function normalizeText(val: any) {
 function matchesGlobalSearch(row: ResultRecord, query: string) {
   if (!query) return true;
   return Object.values(row).some((val) => normalizeText(val).toLowerCase().includes(query));
-}
-
-function matchesColumnFilters(row: ResultRecord, filters: ColumnFilters) {
-  return columnFilterConfig.every((filter) => {
-    const query = filters[filter.key]?.trim().toLowerCase();
-    if (!query) return true;
-    return filter.accessors.some((accessor) => normalizeText(row[accessor]).toLowerCase().includes(query));
-  });
 }
 
 const nonprofitKeywords = [
@@ -835,6 +788,10 @@ const exportColumns = [
   { accessor: "evidence", label: "evidence" },
   { accessor: "pages_scraped", label: "pages_scraped" },
   { accessor: "visited_urls_count", label: "visited_urls_count" },
+  { accessor: "pdf_read", label: "pdf_read" },
+  { accessor: "pdf_url", label: "pdf_url" },
+  { accessor: "pdf_pages", label: "pdf_pages" },
+  { accessor: "pdf_text", label: "pdf_text" },
   { accessor: "extraction_timestamp", label: "extraction_timestamp" },
   { accessor: "error", label: "error" },
   { accessor: "source_folder", label: "source_folder" },
@@ -874,16 +831,18 @@ function downloadCsv(csv: string, filename: string) {
 const tableColumns: {
   accessor: string;
   label: string;
-  render?: (row: ResultRecord) => ReactNode;
+  widthClassName: string;
+  render?: (row: ResultRecord, searchQuery: string) => ReactNode;
 }[] = [
   {
     accessor: "fund_name",
-    label: "Fund",
-    render: (row: ResultRecord) => (
+    label: "Fund details",
+    widthClassName: "w-[50%]",
+    render: (row: ResultRecord, searchQuery: string) => (
       <div className="space-y-1 min-w-0 min-h-[4.5rem]">
         <div className="flex items-center gap-2 min-w-0">
-          <p className="min-w-0 text-sm font-semibold text-neutral-900 truncate">
-            {row.fund_name || "Unnamed fund"}
+          <p className="min-w-0 break-words text-sm font-semibold text-neutral-900">
+            {highlightText(row.fund_name || "Unnamed fund", searchQuery)}
           </p>
           <Badge
             variant={eligibilityTone[row.eligibility] || "outline"}
@@ -899,66 +858,50 @@ const tableColumns: {
             rel="noreferrer"
             className="block min-w-0 truncate text-xs text-neutral-600 underline decoration-neutral-300 underline-offset-4 hover:text-neutral-900"
           >
-            {row.fund_url}
+            {highlightText(row.fund_url, searchQuery)}
           </a>
         ) : (
           <p className="text-xs text-neutral-500">No URL provided.</p>
         )}
-        {row.notes && <p className="text-xs text-neutral-600 truncate">{row.notes}</p>}
+        {row.notes && (
+          <p className="text-xs text-neutral-600 truncate">{highlightText(row.notes, searchQuery)}</p>
+        )}
       </div>
     ),
   },
   {
     accessor: "applicant_types",
     label: "Audience & scope",
-    render: (row: ResultRecord) => (
+    widthClassName: "w-[30%]",
+    render: (row: ResultRecord, searchQuery: string) => (
       <div className="space-y-1 text-xs text-neutral-600 min-h-[4.5rem]">
         <p className="truncate">
-          <span className="font-semibold text-neutral-800">Applicants:</span> {formatValue(row.applicant_types)}
+          <span className="font-semibold text-neutral-800">Applicants:</span>{" "}
+          {highlightText(formatValue(row.applicant_types), searchQuery)}
         </p>
         <p className="truncate">
-          <span className="font-semibold text-neutral-800">Focus:</span> {formatValue(row.beneficiary_focus)}
+          <span className="font-semibold text-neutral-800">Focus:</span>{" "}
+          {highlightText(formatValue(row.beneficiary_focus), searchQuery)}
         </p>
         <p className="truncate">
-          <span className="font-semibold text-neutral-800">Scope:</span> {formatValue(row.geographic_scope)}
+          <span className="font-semibold text-neutral-800">Scope:</span>{" "}
+          {highlightText(formatValue(row.geographic_scope), searchQuery)}
         </p>
-      </div>
-    ),
-  },
-  {
-    accessor: "funding_range",
-    label: "Funding",
-    render: (row: ResultRecord) => (
-      <div className="space-y-1 min-h-[4.5rem]">
-        <p className="text-sm font-semibold text-neutral-900 truncate">
-          {row.funding_range || "Range not provided"}
-        </p>
-        {row.restrictions && (
-          <p className="text-xs text-neutral-600 truncate">Restrictions: {row.restrictions}</p>
-        )}
       </div>
     ),
   },
   {
     accessor: "application_status",
     label: "Status & deadline",
-    render: (row: ResultRecord) => (
+    widthClassName: "w-[20%]",
+    render: (row: ResultRecord, searchQuery: string) => (
       <div className="space-y-1 min-h-[4.5rem]">
         <Badge variant="muted" className="w-fit">
-          {row.application_status || "Not stated"}
+          {highlightText(row.application_status || "Not stated", searchQuery)}
         </Badge>
-        <p className="text-xs text-neutral-600 truncate">Deadline: {row.deadline || "Not listed"}</p>
-      </div>
-    ),
-  },
-  {
-    accessor: "source_folder",
-    label: "Source",
-    render: (row: ResultRecord) => (
-      <div className="space-y-1 min-h-[4.5rem]">
-        <p className="text-sm font-semibold text-neutral-900 truncate">{row.source_folder || "Not listed"}</p>
-        <p className="text-xs text-neutral-600 truncate">Pages: {row.pages_scraped ?? "-"}</p>
-        <p className="text-xs text-neutral-600 truncate">Visited: {row.visited_urls_count ?? "-"}</p>
+        <p className="text-xs text-neutral-600 truncate">
+          Deadline: {highlightText(row.deadline || "Not listed", searchQuery)}
+        </p>
       </div>
     ),
   },

@@ -9,8 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api import dependencies
 from api.config import settings
-from api.routes import health, results, scrape, settings
-
+from api.routes import health, results, scrape
+from api.routes import settings as settings_router
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -35,7 +35,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(results.router)
     app.include_router(scrape.router)
-    app.include_router(settings.router)
+    app.include_router(settings_router.router)
 
     return app
 

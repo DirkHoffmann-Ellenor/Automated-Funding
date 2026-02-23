@@ -18,8 +18,16 @@ class AppConfig:
     def load(cls) -> "AppConfig":
         """Load configuration from environment variables."""
 
+        def _clean_env_value(value: Optional[str]) -> Optional[str]:
+            if value is None:
+                return None
+            cleaned = value.strip()
+            if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {"\"", "'"}:
+                cleaned = cleaned[1:-1].strip()
+            return cleaned or None
+
         raw_sa = (os.getenv("GCP_SERVICE_ACCOUNT_JSON") or "").strip()
-        sa_file = (os.getenv("GCP_SERVICE_ACCOUNT_FILE") or "").strip()
+        sa_file = _clean_env_value(os.getenv("GCP_SERVICE_ACCOUNT_FILE")) or ""
         service_account: Optional[Dict[str, Any]] = None
 
         if raw_sa:
@@ -45,8 +53,8 @@ class AppConfig:
             )
 
         return cls(
-            openai_api_key=os.getenv("OPENAI_API_KEY"),
-            google_sheet_id=os.getenv("GOOGLE_SHEET_ID"),
+            openai_api_key=_clean_env_value(os.getenv("OPENAI_API_KEY")),
+            google_sheet_id=_clean_env_value(os.getenv("GOOGLE_SHEET_ID")),
             gcp_service_account=service_account,
             log_level=os.getenv("LOG_LEVEL", "INFO"),
         )

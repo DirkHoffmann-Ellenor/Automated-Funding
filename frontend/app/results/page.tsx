@@ -387,14 +387,6 @@ export default function ResultsPage() {
               <Button variant="outline" size="sm" onClick={resetFilters} disabled={!filtersActive}>
                 Clear filters
               </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleDownload}
-                disabled={visibleResults.length === 0}
-              >
-                Download filtered
-              </Button>
               {!loading && (
                 <Badge variant="outline">
                   {filtersActive ? `${visibleResults.length} of ${data.length} shown` : `${visibleResults.length} shown`}
@@ -467,7 +459,7 @@ export default function ResultsPage() {
               </div>
             </div>
 
-            <div className="grid gap-3 md:grid-cols-2">
+            <div className="grid gap-3 md:grid-cols-3">
               <label className="flex items-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-700">
                 <Checkbox checked={onlyFutureDeadlines} onChange={(e) => setOnlyFutureDeadlines(e.target.checked)} />
                 Future deadlines only
@@ -482,6 +474,18 @@ export default function ResultsPage() {
                   value={minFunding}
                   onChange={(e) => setMinFunding(e.target.value)}
                 />
+              </div>
+              <div className="space-y-1">
+                <p className="text-xs uppercase tracking-wide text-neutral-600">Export</p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="w-full md:w-auto"
+                  onClick={handleDownload}
+                  disabled={visibleResults.length === 0}
+                >
+                  Download filtered CSV
+                </Button>
               </div>
             </div>
           </div>

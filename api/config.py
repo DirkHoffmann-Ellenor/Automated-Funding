@@ -26,25 +26,34 @@ class AppConfig:
                 cleaned = cleaned[1:-1].strip()
             return cleaned or None
 
+        def _parse_service_account_json(value: str, env_name: str) -> Dict[str, Any]:
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"{env_name} is set but does not contain valid JSON. "
+                    "Provide the full JSON string for the Google service account."
+                ) from exc
+            if not isinstance(parsed, dict):
+                raise ValueError(f"{env_name} must contain a JSON object.")
+            return parsed
+
         raw_sa = (os.getenv("GCP_SERVICE_ACCOUNT_JSON") or "").strip()
         sa_file = _clean_env_value(os.getenv("GCP_SERVICE_ACCOUNT_FILE")) or ""
         service_account: Optional[Dict[str, Any]] = None
 
         if raw_sa:
-            try:
-                service_account = json.loads(raw_sa)
-            except json.JSONDecodeError as exc:
-                raise ValueError(
-                    "GCP_SERVICE_ACCOUNT_JSON is set but is not valid JSON. "
-                    "Provide the full JSON string (or use GCP_SERVICE_ACCOUNT_FILE)."
-                ) from exc
+            service_account = _parse_service_account_json(raw_sa, "GCP_SERVICE_ACCOUNT_JSON")
         elif sa_file:
-            if not os.path.exists(sa_file):
-                raise FileNotFoundError(
-                    f"GCP_SERVICE_ACCOUNT_FILE is set to '{sa_file}' but the file was not found."
-                )
-            with open(sa_file, "r", encoding="utf-8") as fh:
-                service_account = json.load(fh)
+            if sa_file.lstrip().startswith("{"):
+                service_account = _parse_service_account_json(sa_file, "GCP_SERVICE_ACCOUNT_FILE")
+            else:
+                if not os.path.exists(sa_file):
+                    raise FileNotFoundError(
+                        f"GCP_SERVICE_ACCOUNT_FILE is set to '{sa_file}' but the file was not found."
+                    )
+                with open(sa_file, "r", encoding="utf-8") as fh:
+                    service_account = json.load(fh)
 
         if service_account is None:
             raise ValueError(

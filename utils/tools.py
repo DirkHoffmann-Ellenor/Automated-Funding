@@ -800,7 +800,11 @@ def _load_results_csv_cached() -> pd.DataFrame:
         df = pd.DataFrame(rows, columns=header)
     except Exception as exc:
         _log(f"Error loading from Google Sheet: {exc}", "error")
-        _log("Google Services account is: " + str(_SETTINGS.google_service_account), "debug")
+        _log(
+            "Google service account summary: "
+            + _format_service_account_for_log(_SETTINGS.google_service_account),
+            "debug",
+        )
         df = pd.DataFrame(columns=CSV_COLUMNS)
 
     for col in CSV_COLUMNS:
